@@ -69,7 +69,7 @@ class LLMClient:
             ) as resp:
                 if resp.status_code == 200:
                     content = ""
-                    reasoning_content = ""
+                    reasoning = ""
                     async for line in resp.aiter_lines():
                         if line.startswith("data: "):
                             data_str = line[6:]
@@ -81,7 +81,7 @@ class LLMClient:
                                 new_content = delta.get("content", "") or ""
                                 new_reasoning = delta.get("reasoning_content", "") or ""
                                 content += new_content
-                                reasoning_content += new_reasoning
+                                reasoning += new_reasoning
                                 if on_token:
                                     if new_reasoning:
                                         on_token(new_reasoning, True)
@@ -89,12 +89,9 @@ class LLMClient:
                                         on_token(new_content, False)
                             except (json.JSONDecodeError, KeyError, IndexError):
                                 pass
-                    combined = (
-                        f"{reasoning_content}\n\n{content}".strip()
-                        if reasoning_content
-                        else content
-                    )
-                    return LLMResponse(content=combined, timed_out=False)
+                    if len(content.strip()) < 10 and reasoning.strip():
+                        content = reasoning
+                    return LLMResponse(content=content, timed_out=False)
                 elif resp.status_code in (524, 504):
                     return LLMResponse(
                         content="",
@@ -152,6 +149,7 @@ class LLMClient:
             ) as resp:
                 if resp.status_code == 200:
                     content = ""
+                    reasoning = ""
                     async for line in resp.aiter_lines():
                         if line.startswith("data: "):
                             data_str = line[6:]
@@ -160,16 +158,10 @@ class LLMClient:
                             try:
                                 data = json.loads(data_str)
                                 delta = data["choices"][0].get("delta", {})
-                                new_content = (
-                                    delta.get("delta", {}).get("content", "")
-                                    or delta.get("content", "")
-                                    or ""
-                                )
-                                # Handle both 'delta' wrapping and flat structure if needed,
-                                # but usually OpenAI is choices[0].delta.content
                                 new_content = delta.get("content", "") or ""
                                 new_reasoning = delta.get("reasoning_content", "") or ""
                                 content += new_content
+                                reasoning += new_reasoning
                                 if on_token:
                                     if new_reasoning:
                                         on_token(new_reasoning, True)
@@ -177,6 +169,8 @@ class LLMClient:
                                         on_token(new_content, False)
                             except (json.JSONDecodeError, KeyError, IndexError):
                                 pass
+                    if len(content.strip()) < 10 and reasoning.strip():
+                        content = reasoning
                     return LLMResponse(content=content, timed_out=False)
                 elif resp.status_code in (524, 504):
                     return LLMResponse(

@@ -17,19 +17,18 @@ def route_to_workers(state: DeepThinkState) -> list[Send]:
 
 
 def route_after_eval(state: DeepThinkState):
-    max_loops = int(os.environ.get("MAX_LOOPS", "10"))
-
-    if state["status"] == "SOLVED":
+    max_loops = int(os.environ.get("MAX_LOOPS", "3"))
+    status = state.get("status", "RETRY")
+    loop = state.get("loop_count", 1)
+    print(f"[route_after_eval] Status: {status}, Loop: {loop}/{max_loops}", flush=True)
+    if status == "SOLVED":
         return "advisor_synthesizer"
-    elif state["loop_count"] >= max_loops:
+    elif loop >= max_loops:
         return END
-    elif state["status"] == "PIVOT":
+    elif status == "PIVOT":
         return "advisor_planner"
     else:
-        return [
-            Send("flash_worker", {"worker_id": i, "prompt_data": p})
-            for i, p in enumerate(state["flash_prompts"])
-        ]
+        return route_to_workers(state)
 
 
 def build_graph() -> StateGraph:

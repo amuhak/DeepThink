@@ -45,8 +45,9 @@ services:
 
   # Minimal Firecrawl Stack (API handles scrapes)
   firecrawl-redis:
-    image: redis:alpine
+    image: dhi.io/redis:8-compat
     container_name: deep-think-firecrawl-redis
+    command: redis-server --protected-mode no
     networks:
       - agent_network
     restart: unless-stopped
@@ -87,8 +88,8 @@ services:
     volumes:
       - open-webui:/app/backend/data
     environment:
-      - OPENAI_API_BASE_URL=http://orchestrator:8000/v1
-      - OPENAI_API_KEY=deepthink
+      - OPENAI_API_BASE_URLS=http://orchestrator:8000/v1;https://chatfast.amuhak.com/v1
+      - OPENAI_API_KEYS=deepthink;fastchat_key
       - ENABLE_RAG_WEB_SEARCH=True
       - RAG_WEB_SEARCH_ENGINE=searxng
       - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>

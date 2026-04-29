@@ -39,7 +39,9 @@ OUTPUT FORMAT:
 - Briefly think step-by-step.
 - Use tools as needed.
 - Your final answer must start with "FINAL:" on its own line.
-- Always try to extract mathematical formulas and code snippets."""
+- **SOURCE ATTRIBUTION:** For every key fact, you MUST state where you found it (e.g., "Source: [GitHub URL]" or "Source: [Paper Title]").
+- Always try to extract mathematical formulas and code snippets.
+"""
 
 
 def extract_code_blocks(text: str) -> list[str]:
@@ -91,17 +93,25 @@ async def run_search(query: str, worker_id: int) -> str:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(
                 f"{SEARXNG_URL}/search",
-                params={"q": query.strip(), "format": "json"},
+                params={"q": query.strip(), "format": "json", "pageno": 1},
             )
         data = resp.json()
         results = data.get("results", [])
+        # Log search results for debugging
+        print(
+            f"[Worker {worker_id}] Search '{query}': {len(results)} results from {data.get('engines', [])}"
+        )
         snippets = []
-        for r in results[:10]:
+        for r in results:  # Use ALL results, not just first 10
             title = r.get("title", "")
             snippet = r.get("content", "")
             url = r.get("url", "")
-            snippets.append(f"[{title}]({url})\n{snippet}")
-        return "\n\n".join(snippets) if snippets else "No results found."
+            engine = r.get("engine", "unknown")
+            if title and url:
+                snippets.append(f"[{title}]({url})\nSource: {engine}\n{snippet}")
+        if not snippets:
+            return "No results found."
+        return f"Found {len(snippets)} results:\n\n" + "\n\n---\n\n".join(snippets)
     except Exception as e:
         return f"Search error: {str(e)}"
 
@@ -141,29 +151,17 @@ async def flash_worker(state: DeepThinkState) -> dict:
     writer = get_stream_writer()
     writer({"event": "flash_start", "worker": worker_id, "type": prompt_type})
 
-    def on_token(chunk, is_reasoning=False):
-        writer({"event": "token", "source": f"Worker {worker_id}", "text": chunk})
-
     conversation = [
         {"role": "system", "content": FLASH_SYSTEM},
+        {"role": "user", "content": prompt_text},
     ]
-
-    # If we have evaluation history, inject it as context to help the worker avoid previous mistakes
-    if state.get("evaluation_history"):
-        last_critique = state["evaluation_history"][-1]
-        context_msg = (
-            f"This is a RETRY attempt. Your previous attempt or your peers' attempts were critiqued by an advisor.\n"
-            f"ADVISOR CRITIQUE:\n{last_critique}\n\n"
-            f"Please take this critique into account, fix any logic or code errors, and provide a improved response."
-        )
-        conversation.append({"role": "user", "content": context_msg})
-
-    conversation.append({"role": "user", "content": prompt_text})
-
     execution_logs = []
+    used_queries = set()
     final_response = ""
     worker_timed_out = False
-    used_queries = set()
+
+    def on_token(chunk, is_reasoning=False):
+        writer({"event": "token", "source": f"Worker {worker_id}", "text": chunk})
 
     for iteration in range(MAX_TOOL_ITERATIONS):
         resp = await flash_client.invoke(
@@ -211,12 +209,18 @@ async def flash_worker(state: DeepThinkState) -> dict:
             used_queries.add(q)
 
         if repetitive:
-            tool_results.append("ERROR: Repetitive tool call detected. You are repeating a query that already failed or yielded no new info. Please STOP and provide your FINAL summary based on what you already found.")
+            tool_results.append(
+                "ERROR: Repetitive tool call detected. You are repeating a query that already failed or yielded no new info. Please STOP and provide your FINAL summary based on what you already found."
+            )
 
         if not repetitive:
             for code in codes:
                 writer(
-                    {"event": "code_executing", "worker": worker_id, "iteration": iteration}
+                    {
+                        "event": "code_executing",
+                        "worker": worker_id,
+                        "iteration": iteration,
+                    }
                 )
                 log = await run_code(code, worker_id)
                 execution_logs.append(log)
@@ -236,14 +240,14 @@ async def flash_worker(state: DeepThinkState) -> dict:
                     {
                         "worker_id": worker_id,
                         "code": f"SEARCH: {query}",
-                        "stdout": search_result[:2000],
+                        "stdout": search_result[:10000],
                         "stderr": "",
                         "exit_code": 0,
                         "timed_out": False,
                     }
                 )
                 tool_results.append(
-                    f"Search results for '{query}':\n{search_result[:1500]}"
+                    f"Search results for '{query}':\n{search_result[:5000]}"
                 )
 
             for url in scrapes:

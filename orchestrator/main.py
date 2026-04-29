@@ -43,7 +43,7 @@ async def list_models():
                 "object": "model",
                 "created": now,
                 "owned_by": "deepthink",
-            }
+            },
         ],
     }
 
@@ -54,15 +54,18 @@ async def chat_completions(req: ChatCompletionRequest):
     if req.model in ["pro", "flash"]:
         client = pro_client if req.model == "pro" else flash_client
         messages = [{"role": m.role, "content": m.content} for m in req.messages]
-        
+
         if req.stream:
+
             async def direct_stream():
                 payload = {
                     "model": client.model,
                     "messages": messages,
                     "stream": True,
                 }
-                async with client.client.stream("POST", "/chat/completions", json=payload) as resp:
+                async with client.client.stream(
+                    "POST", "/chat/completions", json=payload
+                ) as resp:
                     async for line in resp.aiter_lines():
                         if line:
                             yield f"{line}\n\n"
@@ -71,22 +74,24 @@ async def chat_completions(req: ChatCompletionRequest):
         else:
             resp = await client.invoke(messages)
             chunk_id = str(uuid.uuid4())
-            return JSONResponse(content={
-                "id": chunk_id,
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": req.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": resp.content,
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-            })
+            return JSONResponse(
+                content={
+                    "id": chunk_id,
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": req.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": resp.content,
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+            )
 
     user_prompt = extract_user_prompt(req.messages)
 
@@ -103,7 +108,7 @@ async def chat_completions(req: ChatCompletionRequest):
 
     if req.stream:
         return StreamingResponse(
-            run_streaming(graph, user_prompt, config_overrides),
+            run_streaming(graph, req.messages, config_overrides),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -112,7 +117,7 @@ async def chat_completions(req: ChatCompletionRequest):
             },
         )
     else:
-        result = await run_blocking(graph, user_prompt, config_overrides)
+        result = await run_blocking(graph, req.messages, config_overrides)
         chunk_id = str(uuid.uuid4())
         return JSONResponse(
             content={

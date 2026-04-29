@@ -19,7 +19,7 @@ try:
                 }
             ],
             "stream": True,
-            "num_explorers": 1, 
+            "num_explorers": 1,
         },
         stream=True,
         timeout=600,

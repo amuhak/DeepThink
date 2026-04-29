@@ -1,10 +1,7 @@
 import requests
 
 url = "http://localhost:3002/v1/scrape"
-payload = {
-    "url": "https://example.com",
-    "formats": ["markdown"]
-}
+payload = {"url": "https://example.com", "formats": ["markdown"]}
 
 print(f"Testing Firecrawl API at {url}...")
 try:

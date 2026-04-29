@@ -1,29 +1,23 @@
-import requests, json
+import sys
 
-url = "https://llm.amuhak.com/v1/chat/completions"
+sys.path.insert(0, "/app")
+import asyncio
+from llm_client import pro_client
 
-r = requests.post(
-    url,
-    json={
-        "model": "unsloth/Qwen3.6-27B",
-        "messages": [
+
+async def test():
+    print("Testing invoke_json...", flush=True)
+    resp = await pro_client.invoke_json(
+        [
+            {"role": "system", "content": "You are a helpful assistant."},
             {
-                "role": "system",
-                "content": 'Return valid JSON only. No markdown fences. Structure: {"plan": "string", "prompts": [{"text": "string", "type": "prove"}]}',
+                "role": "user",
+                "content": 'Return a JSON with key "answer" and value "hello"',
             },
-            {"role": "user", "content": "Problem: What is 2+2?"},
-        ],
-        "temperature": 0.3,
-        "max_tokens": 49152,
-        "response_format": {"type": "json_object"},
-    },
-    timeout=300,
-)
+        ]
+    )
+    print("Response:", resp.content[:200])
+    print("Timed out:", resp.timed_out)
 
-data = r.json()
-msg = data["choices"][0]["message"]
-print(f"Finish: {data['choices'][0]['finish_reason']}")
-print(f"Reasoning length: {len(msg.get('reasoning_content', ''))}")
-print(f"Content length: {len(msg.get('content', ''))}")
-print(f"--- Content ---")
-print(msg.get("content", "")[:1000])
+
+asyncio.run(test())

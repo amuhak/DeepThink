@@ -1,0 +1,5 @@
+{
+  "model": "flash",
+  "messages": [{"role": "user", "content": "Explain how photosynthesis works in plants."}],
+  "stream": true
+}

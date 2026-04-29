@@ -10,6 +10,7 @@ ExecutionLog = dict  # {"worker_id": int, "code": str, "stdout": str, "stderr": 
 
 class DeepThinkState(TypedDict):
     user_prompt: str
+    chat_history: list[dict]  # [{"role": str, "content": str}]
     current_plan: str
     flash_prompts: list[FlashPrompt]
 
@@ -21,4 +22,3 @@ class DeepThinkState(TypedDict):
     status: Literal["SOLVED", "RETRY", "PIVOT", "RUNNING"]
     loop_count: int
     final_answer: str
-

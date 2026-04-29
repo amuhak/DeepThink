@@ -11,12 +11,11 @@ EVALUATOR_SYSTEM = """You are the Senior Advisor — a ruthless technical lead a
 You will receive the original problem, current plan, worker outputs, execution logs, and evaluation history.
 
 CRITICAL ASSESSMENT RULES:
-1. DETECT LOOPS: If workers are repeating failed searches or scripts, you MUST intervene.
-2. SENIOR COACHING: In your "critique", do NOT just say "try again". Act like a Senior Engineer:
-   - If a worker fails to scrape a page, suggest they search for a GitHub repo, a PDF link, or try a different search engine query.
-   - If code fails, suggest a specific library (e.g., "try using PyPDF2" or "check the shape of the matrix").
-3. NO HALLUCINATION: If the workers haven't found the specific math/code, do NOT fill it in from your own memory unless you are 100% sure. Instead, PIVOT the workers to find it.
-4. SCRAPING EFFICIENCY: If workers are writing Python code (requests/BS4) to scrape, you MUST critique them and tell them to use the ```scrape``` tool. The sandbox does not have scraping libraries; the ```scrape``` tool is the only supported way to read URLs.
+1. PRIORITIZE EVIDENCE OVER VIBES: A technical report with specific URLs, paper titles (e.g., "ICLR 2026"), or GitHub handles is 10x more valuable than a "plausible" or "sophisticated" explanation. 
+2. EPISTEMIC HUMILITY: You must accept that there are technologies, papers, and libraries released AFTER your training data. If workers provide empirical proof (links, code snippets, paper names), you MUST defer to that evidence even if it contradicts your internal "memory" or seems unlikely.
+3. DETECT DOMAIN CONFLICTS: If workers disagree on the domain, do NOT guess. Identify which worker provided a specific, verifiable URL and investigate that source.
+4. CONFLICT RESOLUTION: If you see a major domain contradiction, your PIVOT must be "Verify Primary Source." Ask the workers to find the official landing page, research paper, or author profile.
+5. NO HALLUCINATION: Do NOT fill in technical details from your memory to "fix" worker outputs. If they haven't found it, pivot them to find it.
 
 SOLVED STATE - TECHNICAL REPORT REQUIREMENTS:
 - When you reach SOLVED, your "final_answer" MUST be an exhaustive, elite technical report.
@@ -39,8 +38,6 @@ Status guidelines:
 - PIVOT: Strategy change needed. If workers are stuck, give them a new tactical lead.
 
 Return raw JSON only."""
-
-
 
 
 def parse_json_response(content: str) -> dict:
@@ -83,6 +80,17 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
     # Build the evaluation prompt
     eval_parts = []
 
+    if state.get("chat_history"):
+        history = state["chat_history"]
+        if history and history[-1]["content"] == state["user_prompt"]:
+            history = history[:-1]
+
+        if history:
+            history_str = "\n".join(
+                [f"{m['role'].upper()}: {m['content']}" for m in history]
+            )
+            eval_parts.append(f"## Previous Conversation Context\n{history_str}")
+
     eval_parts.append(f"## Original Problem\n{state['user_prompt']}")
     eval_parts.append(f"## Current Plan\n{state.get('current_plan', 'No plan')}")
 
@@ -94,10 +102,9 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
 
             final_match = re.search(r"^FINAL:\s*(.*)", resp, re.MULTILINE)
             if final_match:
-                summary = f"FINAL: {final_match.group(1).strip()[:500]}"
+                summary = f"FINAL: {final_match.group(1).strip()[:2000]}"
             else:
-                # Just take last 300 chars as summary
-                summary = resp[-300:] if len(resp) > 300 else resp
+                summary = resp[-2000:] if len(resp) > 2000 else resp
             worker_id = out.get("worker_id", i)
             worker_type = out.get("prompt_type", "?")
             eval_parts.append(
@@ -137,8 +144,6 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
         repetition_penalty=1.0,
     )
 
-    writer({"event": "evaluation_complete"})
-
     if resp.timed_out:
         writer(
             {"event": "decision", "status": "RETRY", "reason": "Evaluator timed out"}
@@ -159,6 +164,8 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
         final_answer = None
 
     writer({"event": "decision", "status": status, "reason": critique[:200]})
+    print(f"[Evaluator] Status: {status}, Critique: {critique[:200]}", flush=True)
+    print(f"[Evaluator] Raw response length: {len(resp.content)}", flush=True)
 
     result = {
         "status": status,

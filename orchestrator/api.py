@@ -48,7 +48,10 @@ def build_sse_chunk(
     return f"data: {json.dumps(data)}\n\n"
 
 
-async def run_streaming(graph, user_prompt: str, config_overrides: dict | None = None):
+async def run_streaming(
+    graph, messages: list[ChatMessage], config_overrides: dict | None = None
+):
+    user_prompt = extract_user_prompt(messages)
     chunk_id = str(uuid.uuid4())
     yield build_sse_chunk(chunk_id, "<thinking>\n")
     thinking_open = True
@@ -62,6 +65,9 @@ async def run_streaming(graph, user_prompt: str, config_overrides: dict | None =
         async for part in graph.astream(
             {
                 "user_prompt": user_prompt,
+                "chat_history": [
+                    {"role": m.role, "content": m.content} for m in messages
+                ],
                 "status": "RUNNING",
                 "loop_count": 0,
                 "flash_outputs": [],
@@ -91,23 +97,14 @@ async def run_streaming(graph, user_prompt: str, config_overrides: dict | None =
                         else:
                             yield build_sse_chunk(chunk_id, text)
                     else:
-                        # Stream directly (e.g. from synthesizer)
                         yield build_sse_chunk(chunk_id, text)
                 elif event == "planning":
                     last_source = None
-                    yield build_sse_chunk(
-                        chunk_id, "\n[Planning research strategy...]\n"
-                    )
-                elif event == "plan_generated":
-                    plan = data.get("plan", "")
-                    yield build_sse_chunk(chunk_id, f"\n**Plan:** {plan}\n\n")
+                    yield build_sse_chunk(chunk_id, "\n[Planning strategy...]\n")
                 elif event == "flash_start":
                     last_source = None
                     wid = data.get("worker", 0)
-                    wtype = data.get("type", "?")
-                    yield build_sse_chunk(
-                        chunk_id, f"\n[Worker {wid} ({wtype}) started...]\n"
-                    )
+                    yield build_sse_chunk(chunk_id, f"\n[Worker {wid} started...]\n")
                 elif event == "code_executing":
                     last_source = None
                     wid = data.get("worker", 0)
@@ -121,13 +118,17 @@ async def run_streaming(graph, user_prompt: str, config_overrides: dict | None =
                     yield build_sse_chunk(
                         chunk_id, f"\n[Worker {wid} searching: {query}...]\n"
                     )
+                elif event == "scraping":
+                    last_source = None
+                    wid = data.get("worker", 0)
+                    url = data.get("url", "")
+                    yield build_sse_chunk(
+                        chunk_id, f"\n[Worker {wid} scraping: {url}...]\n"
+                    )
                 elif event == "flash_done":
                     last_source = None
                     wid = data.get("worker", 0)
-                    wtype = data.get("type", "?")
-                    yield build_sse_chunk(
-                        chunk_id, f"\n[Worker {wid} ({wtype}) complete]\n"
-                    )
+                    yield build_sse_chunk(chunk_id, f"\n[Worker {wid} complete]\n")
                 elif event == "evaluating":
                     last_source = None
                     yield build_sse_chunk(chunk_id, "\n[Evaluating results...]\n")
@@ -138,10 +139,6 @@ async def run_streaming(graph, user_prompt: str, config_overrides: dict | None =
                     yield build_sse_chunk(
                         chunk_id, f"\n[Decision: {status}] {reason[:150]}\n"
                     )
-                elif event == "flash_timeout":
-                    last_source = None
-                    wid = data.get("worker", 0)
-                    yield build_sse_chunk(chunk_id, f"\n[Worker {wid} timed out]\n")
                 elif event == "synthesizing":
                     last_source = None
                     if thinking_open:
@@ -150,7 +147,7 @@ async def run_streaming(graph, user_prompt: str, config_overrides: dict | None =
                     yield build_sse_chunk(chunk_id, "### Analysis Complete\n\n")
 
             elif ptype == "updates":
-                # Final answer is now handled by synthesizer tokens, 
+                # Final answer is now handled by synthesizer tokens,
                 # we don't need to yield it from evaluator updates anymore.
                 pass
 
@@ -169,8 +166,9 @@ async def run_streaming(graph, user_prompt: str, config_overrides: dict | None =
 
 
 async def run_blocking(
-    graph, user_prompt: str, config_overrides: dict | None = None
+    graph, messages: list[ChatMessage], config_overrides: dict | None = None
 ) -> dict:
+    user_prompt = extract_user_prompt(messages)
     config = {"recursion_limit": 100}
     if config_overrides:
         config.update(config_overrides)
@@ -178,6 +176,7 @@ async def run_blocking(
     result = await graph.ainvoke(
         {
             "user_prompt": user_prompt,
+            "chat_history": [{"role": m.role, "content": m.content} for m in messages],
             "status": "RUNNING",
             "loop_count": 0,
             "flash_outputs": [],

@@ -19,7 +19,7 @@ try:
                 }
             ],
             "stream": True,
-            "num_explorers": 1, # Minimal explorers for speed
+            "num_explorers": 1,  # Minimal explorers for speed
         },
         stream=True,
         timeout=300,
@@ -35,9 +35,12 @@ try:
                     content = delta.get("content", "")
                     if content:
                         print(content, end="", flush=True)
-                        
+
                     # Stop early once we see a search being executed or results coming in
-                    if "[Worker 0 searching:" in content or "Search results for" in content:
+                    if (
+                        "[Worker 0 searching:" in content
+                        or "Search results for" in content
+                    ):
                         print("\n\n[SUCCESS: Tool call detected!]")
                         req.close()
                         break

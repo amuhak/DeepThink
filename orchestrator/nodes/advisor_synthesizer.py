@@ -14,28 +14,45 @@ CRITICAL RULES:
 
 You are the final layer of intelligence the user sees. Make it elite."""
 
+
 async def advisor_synthesizer(state: DeepThinkState) -> dict:
     writer = get_stream_writer()
     writer({"event": "synthesizing"})
+    print("[Synthesizer] Starting...", flush=True)
 
     # IGNORE reasoning tokens for the final synthesis to keep the UI clean
     def on_token(chunk, is_reasoning=False):
         if not is_reasoning:
             writer({"event": "token", "source": "Synthesizer", "text": chunk})
 
+    history_str = ""
+    if state.get("chat_history"):
+        history = state["chat_history"]
+        if history and history[-1]["content"] == state["user_prompt"]:
+            history = history[:-1]
+        if history:
+            history_str = (
+                "CONVERSATION HISTORY:\n"
+                + "\n".join([f"{m['role'].upper()}: {m['content']}" for m in history])
+                + "\n\n"
+            )
+
     messages = [
         {"role": "system", "content": SYNTHESIZER_SYSTEM},
-        {"role": "user", "content": f"Original Problem: {state['user_prompt']}\n\nResearch Verdict: {state['evaluation_history'][-1]}\n\nRaw Answer: {state.get('final_answer', 'No answer provided.')}"}
+        {
+            "role": "user",
+            "content": f"{history_str}Original Problem: {state['user_prompt']}\n\nResearch Verdict: {state['evaluation_history'][-1]}\n\nRaw Answer: {state.get('final_answer', 'No answer provided.')}",
+        },
     ]
 
     # Use 'General Thinking' settings for high-quality prose
     resp = await pro_client.invoke(
-        messages, 
-        temperature=1.0, 
+        messages,
+        temperature=1.0,
         on_token=on_token,
         top_p=0.95,
         top_k=20,
-        presence_penalty=1.5
+        presence_penalty=1.5,
     )
-    
+
     return {"final_answer": resp.content, "status": "SOLVED"}
