@@ -20,3 +20,5 @@ class DeepThinkState(TypedDict):
 
     status: Literal["SOLVED", "RETRY", "PIVOT", "RUNNING"]
     loop_count: int
+    final_answer: str
+

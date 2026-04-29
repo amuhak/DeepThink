@@ -9,33 +9,50 @@ from llm_client import flash_client
 
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng:8080")
 SANDBOX_URL = os.environ.get("SANDBOX_URL", "http://code-sandbox:8000")
+FIRECRAWL_URL = os.environ.get("FIRECRAWL_URL", "http://firecrawl-api:3002")
 
 MAX_TOOL_ITERATIONS = 5
 
-FLASH_SYSTEM = """You are a research worker. Your job is to investigate a specific angle of a problem.
+FLASH_SYSTEM = """You are a high-performance research worker. You have direct access to a Python sandbox, a Web Search engine, and a URL Scraper.
 
-Rules:
-1. Briefly think step-by-step
-2. When you need to verify something with code, output a Python code block:
+TOOL RULES:
+1. PYTHON: To execute code, use:
    ```python
    # your code here
    ```
-3. When you need web search, output a search query:
+   **RESTRICTION:** Do NOT write code to scrape websites (e.g., using requests, beautifulsoup, selenium). Use the SCRAPE tool instead. Python scraping is often blocked; the SCRAPE tool uses a professional headless browser.
+
+2. SEARCH: To search the web, use:
    ```search
    your search query here
    ```
-4. After seeing tool results, provide a concise summary or output your final answer
-5. Your final answer must start with "FINAL:" on its own line
+3. SCRAPE: To read the full content of a specific URL (arXiv, GitHub, documentation), use:
+   ```scrape
+   https://example.com/target-page
+   ```
+   **CRITICAL:** Use SCRAPE whenever you find a promising technical link to get full math, code, and details.
 
-CRITICAL: Be extremely concise. Do NOT repeat yourself. If you get stuck in a loop, stop and output your final results."""
+4. EXECUTION IS REAL: Do NOT simulate or "thought-block" your tools.
+5. NO LOOPING: If you have tried searching/scraping twice with no results, admit it and output your FINAL summary.
+
+OUTPUT FORMAT:
+- Briefly think step-by-step.
+- Use tools as needed.
+- Your final answer must start with "FINAL:" on its own line.
+- Always try to extract mathematical formulas and code snippets."""
 
 
 def extract_code_blocks(text: str) -> list[str]:
-    return re.findall(r"```python\s*\n(.*?)\n```", text, re.DOTALL)
+    # Matches ```python ... ``` with optional language tag and flexible whitespace
+    return re.findall(r"```python\s*(.*?)\s*```", text, re.DOTALL)
 
 
 def extract_search_queries(text: str) -> list[str]:
-    return re.findall(r"```search\s*\n(.*?)\n```", text, re.DOTALL)
+    return re.findall(r"```search\s*(.*?)\s*```", text, re.DOTALL)
+
+
+def extract_scrape_urls(text: str) -> list[str]:
+    return re.findall(r"```scrape\s*(.*?)\s*```", text, re.DOTALL)
 
 
 def has_final_answer(text: str) -> bool:
@@ -89,6 +106,32 @@ async def run_search(query: str, worker_id: int) -> str:
         return f"Search error: {str(e)}"
 
 
+async def run_scrape(url: str, worker_id: int) -> str:
+    url = url.strip()
+    # Try local Firecrawl first
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{FIRECRAWL_URL}/v1/scrape",
+                json={"url": url, "formats": ["markdown"]},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success"):
+                    return data.get("data", {}).get("markdown", "")[:15000]
+    except Exception:
+        pass
+
+    # Fallback to r.jina.ai (User suggestion)
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(jina_url)
+        return resp.text[:10000]
+    except Exception as e:
+        return f"Scrape error for {url}: {str(e)}"
+
+
 async def flash_worker(state: DeepThinkState) -> dict:
     worker_id = state.get("worker_id", 0)
     prompt_data = state.get("prompt_data", {})
@@ -120,6 +163,7 @@ async def flash_worker(state: DeepThinkState) -> dict:
     execution_logs = []
     final_response = ""
     worker_timed_out = False
+    used_queries = set()
 
     for iteration in range(MAX_TOOL_ITERATIONS):
         resp = await flash_client.invoke(
@@ -151,43 +195,71 @@ async def flash_worker(state: DeepThinkState) -> dict:
 
         codes = extract_code_blocks(resp.content)
         searches = extract_search_queries(resp.content)
+        scrapes = extract_scrape_urls(resp.content)
 
-        if not codes and not searches:
+        if not codes and not searches and not scrapes:
             break
 
         tool_results = []
 
-        for code in codes:
-            writer(
-                {"event": "code_executing", "worker": worker_id, "iteration": iteration}
-            )
-            log = await run_code(code, worker_id)
-            execution_logs.append(log)
-            status = (
-                "SUCCESS"
-                if log["exit_code"] == 0
-                else f"FAILED (exit {log['exit_code']})"
-            )
-            tool_results.append(
-                f"Code execution {status}:\nstdout:\n{log['stdout']}\nstderr:\n{log['stderr']}"
-            )
+        # Stop if we are repeating searches/scrapes
+        repetitive = False
+        for q in searches + scrapes:
+            if q in used_queries:
+                repetitive = True
+                break
+            used_queries.add(q)
 
-        for query in searches:
-            writer({"event": "searching", "worker": worker_id, "query": query})
-            search_result = await run_search(query, worker_id)
-            execution_logs.append(
-                {
-                    "worker_id": worker_id,
-                    "code": f"SEARCH: {query}",
-                    "stdout": search_result[:2000],
-                    "stderr": "",
-                    "exit_code": 0,
-                    "timed_out": False,
-                }
-            )
-            tool_results.append(
-                f"Search results for '{query}':\n{search_result[:1500]}"
-            )
+        if repetitive:
+            tool_results.append("ERROR: Repetitive tool call detected. You are repeating a query that already failed or yielded no new info. Please STOP and provide your FINAL summary based on what you already found.")
+
+        if not repetitive:
+            for code in codes:
+                writer(
+                    {"event": "code_executing", "worker": worker_id, "iteration": iteration}
+                )
+                log = await run_code(code, worker_id)
+                execution_logs.append(log)
+                status = (
+                    "SUCCESS"
+                    if log["exit_code"] == 0
+                    else f"FAILED (exit {log['exit_code']})"
+                )
+                tool_results.append(
+                    f"Code execution {status}:\nstdout:\n{log['stdout']}\nstderr:\n{log['stderr']}"
+                )
+
+            for query in searches:
+                writer({"event": "searching", "worker": worker_id, "query": query})
+                search_result = await run_search(query, worker_id)
+                execution_logs.append(
+                    {
+                        "worker_id": worker_id,
+                        "code": f"SEARCH: {query}",
+                        "stdout": search_result[:2000],
+                        "stderr": "",
+                        "exit_code": 0,
+                        "timed_out": False,
+                    }
+                )
+                tool_results.append(
+                    f"Search results for '{query}':\n{search_result[:1500]}"
+                )
+
+            for url in scrapes:
+                writer({"event": "scraping", "worker": worker_id, "url": url})
+                scrape_result = await run_scrape(url, worker_id)
+                execution_logs.append(
+                    {
+                        "worker_id": worker_id,
+                        "code": f"SCRAPE: {url}",
+                        "stdout": scrape_result[:2000],
+                        "stderr": "",
+                        "exit_code": 0,
+                        "timed_out": False,
+                    }
+                )
+                tool_results.append(f"Scraped content from {url}:\n{scrape_result}")
 
         if tool_results:
             conversation.append(

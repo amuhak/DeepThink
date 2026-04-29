@@ -69,6 +69,7 @@ async def run_streaming(graph, user_prompt: str, config_overrides: dict | None =
                 "evaluation_history": [],
                 "flash_prompts": [],
                 "current_plan": "",
+                "final_answer": "",
             },
             stream_mode=["updates", "custom"],
             version="v2",
@@ -184,6 +185,7 @@ async def run_blocking(
             "evaluation_history": [],
             "flash_prompts": [],
             "current_plan": "",
+            "final_answer": "",
         },
         config=config,
     )

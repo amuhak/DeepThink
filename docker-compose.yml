@@ -7,10 +7,9 @@ services:
     environment:
       - SEARXNG_URL=http://searxng:8080
       - SANDBOX_URL=http://code-sandbox:8000
+      - FIRECRAWL_URL=http://firecrawl-api:3002
     ports:
       - "${ORCHESTRATOR_PORT:-8000}:8000"
-    volumes:
-      - ./orchestrator:/app
     depends_on:
       - searxng
       - code-sandbox
@@ -42,6 +41,42 @@ services:
       - ALL
     mem_limit: 512m
     cpus: 1.0
+    restart: unless-stopped
+
+  # Minimal Firecrawl Stack (API handles scrapes)
+  firecrawl-redis:
+    image: redis:alpine
+    container_name: deep-think-firecrawl-redis
+    networks:
+      - agent_network
+    restart: unless-stopped
+
+  playwright-service:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    container_name: deep-think-playwright-service
+    networks:
+      - agent_network
+    restart: unless-stopped
+
+  firecrawl-api:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    container_name: deep-think-firecrawl-api
+    entrypoint: ["node", "dist/src/index.js"]
+    environment:
+      - PORT=3002
+      - HOST=0.0.0.0
+      - REDIS_URL=redis://firecrawl-redis:6379
+      - REDIS_RATE_LIMIT_URL=redis://firecrawl-redis:6379
+      - PLAYWRIGHT_MICROSERVICE_URL=http://playwright-service:3000/scrape
+      - USE_DB_AUTHENTICATION=false
+      - SELF_HOSTED=true
+    ports:
+      - "3002:3002"
+    depends_on:
+      - firecrawl-redis
+      - playwright-service
+    networks:
+      - agent_network
     restart: unless-stopped
 
   openwebui:

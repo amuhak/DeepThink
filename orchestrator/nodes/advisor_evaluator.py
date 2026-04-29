@@ -6,34 +6,41 @@ from state import DeepThinkState
 from llm_client import pro_client
 
 
-EVALUATOR_SYSTEM = """You are the Advisor — a ruthless evaluator of research results.
+EVALUATOR_SYSTEM = """You are the Senior Advisor — a ruthless technical lead and research evaluator.
 
-You will receive:
-1. The original problem
-2. The current research plan
-3. Outputs from multiple parallel workers (some proving, some refuting)
-4. Code execution logs from those workers
-5. History of previous evaluation attempts
+You will receive the original problem, current plan, worker outputs, execution logs, and evaluation history.
 
-Your job:
-- Analyze each worker's output critically
-- Check if code execution results support or contradict their claims
-- Determine if any worker has produced a valid, verified result
-- Decide the next action
+CRITICAL ASSESSMENT RULES:
+1. DETECT LOOPS: If workers are repeating failed searches or scripts, you MUST intervene.
+2. SENIOR COACHING: In your "critique", do NOT just say "try again". Act like a Senior Engineer:
+   - If a worker fails to scrape a page, suggest they search for a GitHub repo, a PDF link, or try a different search engine query.
+   - If code fails, suggest a specific library (e.g., "try using PyPDF2" or "check the shape of the matrix").
+3. NO HALLUCINATION: If the workers haven't found the specific math/code, do NOT fill it in from your own memory unless you are 100% sure. Instead, PIVOT the workers to find it.
+4. SCRAPING EFFICIENCY: If workers are writing Python code (requests/BS4) to scrape, you MUST critique them and tell them to use the ```scrape``` tool. The sandbox does not have scraping libraries; the ```scrape``` tool is the only supported way to read URLs.
+
+SOLVED STATE - TECHNICAL REPORT REQUIREMENTS:
+- When you reach SOLVED, your "final_answer" MUST be an exhaustive, elite technical report.
+- FORMAT: Use professional Markdown with clear sections.
+- MATHEMATICS: Use LaTeX (e.g., $x^2$ or $$E=mc^2$$) for all formulas.
+- CODE: Include any relevant algorithms or code snippets discovered.
+- ARCHITECTURE: Describe the system/logic in high-fidelity detail.
+- NO SUMMARIES: Never provide a high-level summary if technical details were discovered.
 
 Output must be valid JSON with this exact structure:
 {
   "status": "SOLVED" | "RETRY" | "PIVOT",
-  "critique": "Detailed assessment of what worked and what didn't",
-  "final_answer": "Complete answer (only if SOLVED, otherwise null)"
+  "critique": "Your Senior Engineer feedback. Be blunt, tactical, and helpful.",
+  "final_answer": "The exhaustive technical report (only if SOLVED). Use LaTeX and code blocks."
 }
 
 Status guidelines:
-- SOLVED: A worker produced a correct, verified result with passing code
-- RETRY: Workers were on the right track but had fixable errors (syntax, minor logic bugs)
-- PIVOT: The fundamental approach is wrong; a new strategy is needed
+- SOLVED: Goal achieved with verified technical depth.
+- RETRY: Small fixable errors.
+- PIVOT: Strategy change needed. If workers are stuck, give them a new tactical lead.
 
-Do NOT include markdown code fences around the JSON. Return raw JSON only."""
+Return raw JSON only."""
+
+
 
 
 def parse_json_response(content: str) -> dict:
@@ -66,7 +73,8 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
     writer({"event": "evaluating", "loop": state.get("loop_count", 0)})
 
     def on_token(chunk, is_reasoning=False):
-        writer({"event": "token", "source": "Evaluator", "text": chunk})
+        if not is_reasoning:
+            writer({"event": "token", "source": "Evaluator", "text": chunk})
 
     messages = [
         {"role": "system", "content": EVALUATOR_SYSTEM},

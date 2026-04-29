@@ -14,18 +14,23 @@ You must generate exactly NUM_PROMPTS sub-prompts for parallel worker models:
 - Half should attempt to PROVE the premise
 - Half should attempt to REFUTE or find counterexamples
 
-Each prompt should be direct and focused on a specific investigation angle.
+TOOL USAGE INSTRUCTIONS:
+- Tell workers specifically to use ```search\\nquery\\n```, ```scrape\\nurl\\n```, or ```python\\ncode\\n``` blocks.
+- **IMPORTANT:** Explicitly forbid workers from writing Python code to scrape (requests/BS4). Tell them to use the ```scrape``` tool instead as it bypasses bot detection.
+- Remind them that ```scrape``` is the most powerful way to get full technical text, math, and code from a URL.
+- They MUST NOT simulate results.
 
 Output must be valid JSON with this exact structure:
 {
   "plan": "High-level research strategy",
   "prompts": [
-    {"text": "Direct instructions for worker...", "type": "prove"},
+    {"text": "Investigate X by using the ```search``` tool for queries A and B. Then verify with ```python```...", "type": "prove"},
     {"text": "Direct instructions for worker...", "type": "refute"}
   ]
 }
 
-CRITICAL: Be extremely concise. Do NOT include redundant instructions in worker prompts as they already have a system prompt. Return raw JSON only."""
+CRITICAL: Be extremely concise. Return raw JSON only."""
+
 
 
 def parse_json_response(content: str) -> dict:
@@ -58,7 +63,8 @@ async def advisor_planner(state: DeepThinkState) -> dict:
     writer({"event": "planning", "loop": state.get("loop_count", 0) + 1})
 
     def on_token(chunk, is_reasoning=False):
-        writer({"event": "token", "source": "Planner", "text": chunk})
+        if not is_reasoning:
+            writer({"event": "token", "source": "Planner", "text": chunk})
 
     n_explorers = int(os.environ.get("NUM_FLASH_EXPLORERS", "4"))
     system_prompt = PRO_PLANNER_SYSTEM.replace("NUM_PROMPTS", str(n_explorers))
