@@ -1,0 +1,72 @@
+services:
+  orchestrator:
+    build: ./orchestrator
+    container_name: deep-think-orchestrator
+    env_file:
+      - .env
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - SANDBOX_URL=http://code-sandbox:8000
+    ports:
+      - "${ORCHESTRATOR_PORT:-8000}:8000"
+    volumes:
+      - ./orchestrator:/app
+    depends_on:
+      - searxng
+      - code-sandbox
+    networks:
+      - agent_network
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: deep-think-searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml
+    environment:
+      - SEARXNG_SECRET=deepthink-secret-key-12345
+      - SEARXNG_BIND_ADDRESS=0.0.0.0
+      - SEARXNG_BASE_URL=http://0.0.0.0:8080/
+    networks:
+      - agent_network
+    restart: unless-stopped
+
+  code-sandbox:
+    build: ./code-sandbox
+    container_name: deep-think-sandbox
+    networks:
+      - agent_network
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: deep-think-openwebui
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui:/app/backend/data
+    environment:
+      - OPENAI_API_BASE_URL=http://orchestrator:8000/v1
+      - OPENAI_API_KEY=deepthink
+      - ENABLE_RAG_WEB_SEARCH=True
+      - RAG_WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
+    depends_on:
+      - orchestrator
+      - searxng
+    networks:
+      - agent_network
+    restart: unless-stopped
+
+networks:
+  agent_network:
+    driver: bridge
+
+volumes:
+  open-webui:
