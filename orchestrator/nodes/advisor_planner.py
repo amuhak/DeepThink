@@ -64,7 +64,7 @@ def parse_json_response(content: str) -> dict:
                 json_string = content[brace_start : brace_end + 1]
                 import re
                 # Fix LaTeX: escape single backslashes before common commands
-                json_string = re.sub(r'\\([a-zA-Z]+)', r'\\\\\1', json_string)
+                json_string = re.sub(r'(?<!\\)\\([a-zA-Z]+)', r'\\\\\1', json_string)
                 # Fix remaining invalid escapes
                 json_string = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_string)
                 return json.loads(json_string, strict=False)

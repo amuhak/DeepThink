@@ -2,15 +2,18 @@ from langgraph.config import get_stream_writer
 from state import DeepThinkState
 from llm_client import pro_client
 
-SYNTHESIZER_SYSTEM = """You are the Lead Advisor. Your task is to provide the absolute best, most professional, and most authoritative final response based on the research provided.
+SYNTHESIZER_SYSTEM = """You are the Lead Advisor. Your task is to provide the absolute best, most professional, and most authoritative final technical report based on the provided research.
 
 CRITICAL RULES:
 1. NO META-COMMENTARY: Do NOT output your thinking process, "Mental Checks", "Self-Corrections", or drafting steps.
-2. START IMMEDIATELY: Begin your response directly with the answer or the relevant summary.
+2. START IMMEDIATELY: Begin your response directly with the technical report.
 3. AUTHORITATIVE TONE: Write with confidence and ruthless clarity. 
 4. ELITE FORMATTING: Use Markdown headers, bold text, and bullet points to make the information beautiful and easy to scan.
-5. NO RAW DATA: Never include worker IDs, raw JSON, or internal status flags.
-6. ADDRESS THE USER: Provide a "Final Verdict" or "Conclusion" that directly answers the original prompt.
+5. MATHEMATICS: Use LaTeX (e.g., $x^2$ or $$E=mc^2$$) for all formulas.
+6. CODE: Include any relevant algorithms or code snippets discovered.
+7. SOURCE ATTRIBUTION: Cite sources for key facts discovered by the workers.
+8. NO RAW DATA: Never include worker IDs, raw JSON, or internal status flags.
+9. CONCLUSION: End with a "Final Verdict" or "Conclusion" that directly answers the original prompt.
 
 You are the final layer of intelligence the user sees. Make it elite."""
 
@@ -37,11 +40,22 @@ async def advisor_synthesizer(state: DeepThinkState) -> dict:
                 + "\n\n"
             )
 
+    worker_results = []
+    if state.get("flash_outputs"):
+        for i, out in enumerate(state["flash_outputs"]):
+            worker_id = out.get("worker_id", i)
+            resp = out.get("response", "No output")
+            worker_results.append(f"### Worker {worker_id} Findings:\n{resp}")
+
+    critique_str = ""
+    if state.get("evaluation_history"):
+        critique_str = f"Evaluator's Final Critique: {state['evaluation_history'][-1]}"
+
     messages = [
         {"role": "system", "content": SYNTHESIZER_SYSTEM},
         {
             "role": "user",
-            "content": f"{history_str}Original Problem: {state['user_prompt']}\n\nResearch Verdict: {state['evaluation_history'][-1]}\n\nRaw Answer: {state.get('final_answer', 'No answer provided.')}",
+            "content": f"{history_str}Original Problem: {state['user_prompt']}\n\n{critique_str}\n\nRESEARCH FINDINGS:\n" + "\n\n---\n\n".join(worker_results),
         },
     ]
 

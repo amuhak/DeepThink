@@ -1,0 +1,341 @@
+diff --git a/README.md b/README.md
+index fc287d8..db09d60 100644
+--- a/README.md
++++ b/README.md
+@@ -6,39 +6,39 @@ Local DeepMind-style Deep Think clone using LangGraph multi-agent orchestration
+ 
+ ```
+ User → OpenAI API → Orchestrator (LangGraph)
+-                              ├── PRO LLM (advisor_planner / advisor_evaluator / advisor_synthesizer)
+-                              ├── FLASH LLM × N (flash_worker via Send() API)
+-                              ├── Code Sandbox (isolated Python execution)
+-                              ├── Firecrawl (headless browser scraping) + Jina fallback
+-                              └── SearXNG (local web search)
++                               ├── PRO LLM (advisor_planner / advisor_evaluator / advisor_synthesizer)
++                               ├── FLASH LLM × N (flash_worker via Send() API)
++                               ├── Code Sandbox (isolated Python execution)
++                               ├── Firecrawl (headless browser scraping) + Jina fallback
++                               └── SearXNG (local web search)
+ ```
+ 
+ ### Nodes
+ 
+ | Node | LLM | Purpose |
+-|---|---|---|
++|------|-----|---------|
+ | `advisor_planner` | PRO | Strategic planner. Generates N balanced prompts (prove/refute) and instructs workers on tool use. |
+-| `flash_worker` | FLASH | High-speed researcher. Parallel execution via `Send()`. Uses `search`, `scrape` (Firecrawl + Jina), and `python`. Each worker runs up to 5 tool iterations internally. |
+-| `advisor_evaluator` | PRO | Senior Technical Lead. Critiques worker output, detects loops, and decides SOLVED/RETRY/PIVOT. |
++| `flash_worker` | FLASH | High-speed researcher. Parallel execution via `Send()`. Uses `search`, `scrape` (Firecrawl + Jina), and `python`. Each worker runs up to 5 tool iterations internally. Features global memory to avoid repeating failed URLs/queries. |
++| `advisor_evaluator` | PRO | Senior Technical Lead. Critiques worker output, detects loops, and decides SOLVED/RETRY/PIVOT. Includes LaTeX-aware JSON parsing. |
+ | `advisor_synthesizer`| PRO | Final Report Writer. Polishes raw research into an elite, LaTeX-heavy technical report. |
+ 
+ ### Flow
+ 
+ ```
+ START → advisor_planner → [Send() × N] → flash_worker (parallel)
+-                                              ↓ (converge via operator.add)
+-                                        advisor_evaluator
+-                                              ↓
+-                                     SOLVED → advisor_synthesizer → END
+-                                     RETRY  → flash_worker (with critique)
+-                                     PIVOT  → advisor_planner (new strategy)
++                                               ↓ (converge via operator.add)
++                                         advisor_evaluator
++                                               ↓
++                                      SOLVED → advisor_synthesizer → END
++                                      RETRY  → flash_worker (with critique)
++                                      PIVOT  → advisor_planner (new strategy)
+ ```
+ 
+ ### Worker Stop Reasons
+ 
+ Workers can stop due to:
+ - `FINAL_marker`: Worker output contains `FINAL:` prefix
+-- `no_tools`: No code/search/scrape blocks detected in response
++- `no_tools`: No code/search/scrape blocks detected in response (now prompts worker to continue instead of silent break)
+ - `repetitive_tool`: Same query already tried
+ - `max_iterations`: Hit 5 tool iteration limit
+ - `timeout`: FLASH model timed out
+@@ -72,6 +72,19 @@ docker compose build orchestrator
+ docker compose up -d --force-recreate orchestrator
+ ```
+ 
++**Debug Mode:**
++Enable LLM debug logging by adding to your `.env`:
++```
++DEBUG_LLM=1
++```
++This logs SSE events, content length, and HTTP status codes to stdout.
++
++**Worker Debug Logs:**
++Workers write debug info to `/tmp/worker_N_debug.log` (where N is the worker ID). Check these logs after runs:
++```bash
++docker exec deep-think-orchestrator cat /tmp/worker_0_debug.log
++```
++
+ ## API
+ 
+ ### `POST /v1/chat/completions`
+@@ -104,35 +117,44 @@ OpenAI-compatible endpoint. Supports real-time thought streaming.
+ ## Environment Variables
+ 
+ | Variable | Default | Description |
+-|---|---|---|
++|----------|---------|-------------|
+ | `PRO_LLM_URL` | `http://host.docker.internal:8001/v1` | PRO model endpoint (OpenAI-compatible) |
+ | `FLASH_LLM_URL` | - | FLASH model endpoint |
+-| `PRO_MODEL` | - | Reasoning model (e.g., Qwen3.6-27B) |
+-| `FLASH_MODEL` | - | Speed model (e.g., NVIDIA-Nemotron-3-Nano-Omni-30B) |
++| `FASTCHAT_LLM_URL` | `http://100.82.53.76:8000` | FastChat model endpoint (used by Open WebUI) |
++| `PRO_MODEL` | - | Reasoning model (e.g., unsloth/Qwen3.6-27B) |
++| `FLASH_MODEL` | - | Speed model (e.g., unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B) |
++| `FASTCHAT_MODEL` | `fastChat` | FastChat model name |
+ | `NUM_FLASH_EXPLORERS` | `4` | Number of parallel Flash workers |
+-| `MAX_LOOPS` | `3` | Maximum iteration loops before forced synthesis |
++| `MAX_LOOPS` | `10` | Maximum iteration loops before forced synthesis |
+ | `FLASH_TIMEOUT_SECONDS` | `120` | Timeout for FLASH model calls |
++| `DEBUG_LLM` | `0` | Enable LLM debug logging (set to `1`) |
+ 
+ ## Services
+ 
+ | Service | Port | Description |
+-|---|---|---|
++|---------|------|-------------|
+ | `orchestrator` | 8000 | LangGraph agent framework + OpenAI API |
+ | `searxng` | 8080 | Local web search engine |
+ | `firecrawl-api`| 3002 | Headless browser API for deep scraping |
+ | `code-sandbox` | internal | Isolated Python execution (numpy, sympy, scipy, pandas) |
+-| `openwebui` | 3000 | (Optional) Modern UI for interacting with DeepThink |
++| `openwebui` | 3000 | (Optional) Modern UI for interacting with DeepThink. Connects to orchestrator, FastChat, PRO, and FLASH endpoints. |
+ 
+ ## Design Decisions
+ 
+ - **Silent Thinking Filter**: PRO/FLASH models may output `reasoning_content` with internal thinking. This is merged into the main content stream for display.
+-- **Firecrawl + Jina Fallback**: Workers use local Firecrawl for scraping, falling back to `r.jina.ai` if it fails. Note: Both struggle with PDF extraction - prefer HTML sources.
++- **Firecrawl + Jina Fallback**: Workers use local Firecrawl for scraping, falling back to `r.jina.ai` if it fails. Both now use PDF Rust extraction (`PDF_RUST_EXTRACT_ENABLE=true`), but workers are instructed to prefer HTML sources (arXiv abs/ vs pdf/) for better LaTeX preservation.
+ - **Exhaustive Reporting**: The system produces high-fidelity technical reports with LaTeX and code snippets, rather than simple summaries.
+ - **Safety**: Each worker is restricted to 5 tool iterations and is automatically terminated if it detects a query loop.
+-- **JSON Resilience**: Planner and evaluator use custom parsers that handle markdown code fences, truncated JSON, and invalid escape characters.
++- **JSON Resilience**: Planner and evaluator use custom parsers that handle markdown code fences, truncated JSON, invalid escape characters, and LaTeX expressions (e.g., `\frac`, `\sum`, `\alpha`).
+ - **Three-Retry Timeout**: LLM calls retry up to 3 times on 524/504 gateway errors before marking as failed.
++- **Global Memory**: Workers track failed URLs and search queries across loops. The state includes `failed_urls` and `failed_queries` (using `operator.add` reducer), which are passed to subsequent workers via system prompt to avoid repeating failed attempts.
++- **Paywall Blacklist**: Academic search queries automatically exclude major paywall sites (`-site:sciencedirect.com -site:elsevier.com -site:springer.com -site:nature.com -site:ieee.com -site:acm.org`) to improve content accessibility.
++- **Improved Error Handling**: LLM client now returns `[WORKER ERROR: ...]` or `[TIMEOUT]` in content instead of empty strings, allowing the evaluator to detect and report API failures properly.
++- **Worker Output Fallback**: If a worker produces no output (empty string), the system now adds `[WORKER produced no output - likely API failure or timeout]` to surface the issue.
+ 
+ ## Known Limitations
+ 
+ - **PDF Extraction**: Firecrawl and Jina.ai convert PDFs to plain text but lose LaTeX formatting. Workers should prefer HTML versions of papers (arXiv, Scholar, etc.) over PDFs.
+-- **FLASH Speed**: The FLASH endpoint may be slower than PRO. Worker tool calls and search results are truncated to manage payload size.
+\ No newline at end of file
++- **FLASH Speed**: The FLASH endpoint may be slower than PRO. Worker tool calls and search results are truncated to manage payload size.
++- **Worker Debugging**: If workers return empty outputs, check `/tmp/worker_N_debug.log` inside the container and enable `DEBUG_LLM=1` in `.env`.
++- **LaTeX in JSON**: Despite improved parsing, complex LaTeX expressions in evaluator JSON output may still cause parse failures. The system will retry with evaluator hints.
+diff --git a/orchestrator/nodes/advisor_evaluator.py b/orchestrator/nodes/advisor_evaluator.py
+index 935f8ab..30b5e1f 100644
+--- a/orchestrator/nodes/advisor_evaluator.py
++++ b/orchestrator/nodes/advisor_evaluator.py
+@@ -17,26 +17,17 @@ CRITICAL ASSESSMENT RULES:
+ 4. CONFLICT RESOLUTION: If you see a major domain contradiction, your PIVOT must be "Verify Primary Source." Ask the workers to find the official landing page, research paper, or author profile.
+ 5. NO HALLUCINATION: Do NOT fill in technical details from your memory to "fix" worker outputs. If they haven't found it, pivot them to find it.
+ 
+-SOLVED STATE - TECHNICAL REPORT REQUIREMENTS:
+-- When you reach SOLVED, your "final_answer" MUST be an exhaustive, elite technical report.
+-- FORMAT: Use professional Markdown with clear sections.
+-- MATHEMATICS: Use LaTeX (e.g., $x^2$ or $$E=mc^2$$) for all formulas.
+-- CODE: Include any relevant algorithms or code snippets discovered.
+-- ARCHITECTURE: Describe the system/logic in high-fidelity detail.
+-- NO SUMMARIES: Never provide a high-level summary if technical details were discovered.
++DECISION CRITERIA:
++- SOLVED: Goal achieved with verified technical depth. All major technical questions answered with evidence.
++- RETRY: Small fixable errors or missing specific details that are likely findable.
++- PIVOT: Strategy change needed. If workers are stuck, give them a new tactical lead.
+ 
+ Output must be valid JSON with this exact structure:
+ {
+   "status": "SOLVED" | "RETRY" | "PIVOT",
+-  "critique": "Your Senior Engineer feedback. Be blunt, tactical, and helpful.",
+-  "final_answer": "The exhaustive technical report (only if SOLVED). Use LaTeX and code blocks."
++  "critique": "Your Senior Engineer feedback. Summarize what has been found and what (if anything) is missing. If SOLVED, provide a brief concluding summary of the achievement."
+ }
+ 
+-Status guidelines:
+-- SOLVED: Goal achieved with verified technical depth.
+-- RETRY: Small fixable errors.
+-- PIVOT: Strategy change needed. If workers are stuck, give them a new tactical lead.
+-
+ Return raw JSON only."""
+ 
+ 
+@@ -73,7 +64,7 @@ def parse_json_response(content: str) -> dict:
+                 # Fix invalid escapes for LaTeX: escape single backslashes before common commands
+                 import re
+                 # Replace \frac, \sum, \alpha, etc with \\frac, \\sum, \\alpha
+-                json_string = re.sub(r'\\([a-zA-Z]+)', r'\\\\\1', json_string)
++                json_string = re.sub(r'(?<!\\)\\([a-zA-Z]+)', r'\\\\\1', json_string)
+                 # Fix remaining invalid escapes: escape any backslash not followed by valid JSON escape
+                 json_string = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_string)
+                 try:
+@@ -131,7 +122,11 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
+             if final_match:
+                 summary = f"FINAL: {final_match.group(1).strip()[:2000]}"
+             else:
+-                summary = resp[-2000:] if len(resp) > 2000 else resp
++                if len(resp) > 2000:
++                    # Preserve early evidence (URLs, sources) + late FINAL section
++                    summary = resp[:1000] + "\n...[TRUNCATED]...\n" + resp[-1000:]
++                else:
++                    summary = resp
+             worker_id = out.get("worker_id", i)
+             worker_type = out.get("prompt_type", "?")
+             eval_parts.append(
+@@ -186,11 +181,9 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
+         data = parse_json_response(resp.content)
+         status = data.get("status", "RETRY")
+         critique = data.get("critique", "No critique provided")
+-        final_answer = data.get("final_answer", None)
+     except (json.JSONDecodeError, KeyError) as e:
+         status = "RETRY"
+         critique = f"Evaluator JSON parse failed: {str(e)}. Raw: [{resp.content[:200]}]"
+-        final_answer = None
+ 
+     writer({"event": "decision", "status": status, "reason": critique[:200], "loop": loop_count})
+     print(f"[Evaluator] Status: {status}, Critique: {critique[:200]}", flush=True)
+@@ -202,7 +195,4 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
+         "loop_count": loop_count,
+     }
+ 
+-    if status == "SOLVED" and final_answer is not None:
+-        result["final_answer"] = final_answer
+-
+     return result
+diff --git a/orchestrator/nodes/advisor_planner.py b/orchestrator/nodes/advisor_planner.py
+index 542079c..407b88b 100644
+--- a/orchestrator/nodes/advisor_planner.py
++++ b/orchestrator/nodes/advisor_planner.py
+@@ -64,7 +64,7 @@ def parse_json_response(content: str) -> dict:
+                 json_string = content[brace_start : brace_end + 1]
+                 import re
+                 # Fix LaTeX: escape single backslashes before common commands
+-                json_string = re.sub(r'\\([a-zA-Z]+)', r'\\\\\1', json_string)
++                json_string = re.sub(r'(?<!\\)\\([a-zA-Z]+)', r'\\\\\1', json_string)
+                 # Fix remaining invalid escapes
+                 json_string = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_string)
+                 return json.loads(json_string, strict=False)
+diff --git a/orchestrator/nodes/advisor_synthesizer.py b/orchestrator/nodes/advisor_synthesizer.py
+index 7fd1314..f5bd4cf 100644
+--- a/orchestrator/nodes/advisor_synthesizer.py
++++ b/orchestrator/nodes/advisor_synthesizer.py
+@@ -2,15 +2,18 @@ from langgraph.config import get_stream_writer
+ from state import DeepThinkState
+ from llm_client import pro_client
+ 
+-SYNTHESIZER_SYSTEM = """You are the Lead Advisor. Your task is to provide the absolute best, most professional, and most authoritative final response based on the research provided.
++SYNTHESIZER_SYSTEM = """You are the Lead Advisor. Your task is to provide the absolute best, most professional, and most authoritative final technical report based on the provided research.
+ 
+ CRITICAL RULES:
+ 1. NO META-COMMENTARY: Do NOT output your thinking process, "Mental Checks", "Self-Corrections", or drafting steps.
+-2. START IMMEDIATELY: Begin your response directly with the answer or the relevant summary.
++2. START IMMEDIATELY: Begin your response directly with the technical report.
+ 3. AUTHORITATIVE TONE: Write with confidence and ruthless clarity. 
+ 4. ELITE FORMATTING: Use Markdown headers, bold text, and bullet points to make the information beautiful and easy to scan.
+-5. NO RAW DATA: Never include worker IDs, raw JSON, or internal status flags.
+-6. ADDRESS THE USER: Provide a "Final Verdict" or "Conclusion" that directly answers the original prompt.
++5. MATHEMATICS: Use LaTeX (e.g., $x^2$ or $$E=mc^2$$) for all formulas.
++6. CODE: Include any relevant algorithms or code snippets discovered.
++7. SOURCE ATTRIBUTION: Cite sources for key facts discovered by the workers.
++8. NO RAW DATA: Never include worker IDs, raw JSON, or internal status flags.
++9. CONCLUSION: End with a "Final Verdict" or "Conclusion" that directly answers the original prompt.
+ 
+ You are the final layer of intelligence the user sees. Make it elite."""
+ 
+@@ -37,11 +40,22 @@ async def advisor_synthesizer(state: DeepThinkState) -> dict:
+                 + "\n\n"
+             )
+ 
++    worker_results = []
++    if state.get("flash_outputs"):
++        for i, out in enumerate(state["flash_outputs"]):
++            worker_id = out.get("worker_id", i)
++            resp = out.get("response", "No output")
++            worker_results.append(f"### Worker {worker_id} Findings:\n{resp}")
++
++    critique_str = ""
++    if state.get("evaluation_history"):
++        critique_str = f"Evaluator's Final Critique: {state['evaluation_history'][-1]}"
++
+     messages = [
+         {"role": "system", "content": SYNTHESIZER_SYSTEM},
+         {
+             "role": "user",
+-            "content": f"{history_str}Original Problem: {state['user_prompt']}\n\nResearch Verdict: {state['evaluation_history'][-1]}\n\nRaw Answer: {state.get('final_answer', 'No answer provided.')}",
++            "content": f"{history_str}Original Problem: {state['user_prompt']}\n\n{critique_str}\n\nRESEARCH FINDINGS:\n" + "\n\n---\n\n".join(worker_results),
+         },
+     ]
+ 
+diff --git a/orchestrator/nodes/flash_worker.py b/orchestrator/nodes/flash_worker.py
+index 97ca8c8..c227c0c 100644
+--- a/orchestrator/nodes/flash_worker.py
++++ b/orchestrator/nodes/flash_worker.py
+@@ -11,7 +11,7 @@ SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng:8080")
+ SANDBOX_URL = os.environ.get("SANDBOX_URL", "http://code-sandbox:8000")
+ FIRECRAWL_URL = os.environ.get("FIRECRAWL_URL", "http://firecrawl-api:3002")
+ 
+-MAX_TOOL_ITERATIONS = 5
++MAX_TOOL_ITERATIONS = 10
+ 
+ FLASH_SYSTEM = """You are a high-performance research worker. You have direct access to a Python sandbox, a Web Search engine, and a URL Scraper.
+ 
+@@ -205,10 +205,13 @@ async def flash_worker(state: DeepThinkState) -> dict:
+         {"role": "user", "content": prompt_text},
+     ]
+     execution_logs = []
+-    used_queries = set(failed_queries)  # Start with global failed queries
++    # Only block last 50 failed queries to allow retry of transient failures
++    used_queries = set(failed_queries[-50:]) if failed_queries else set()
+     final_response = ""
+     worker_timed_out = False
+     local_failed_urls = []
++    local_failed_queries = set()
++    no_tool_prompt_count = 0
+ 
+     debug_log.write(f"[Worker {worker_id}] Conversation prepared. System length={len(system_with_memory)}, User length={len(prompt_text)}\n")
+     debug_log.write(f"[Worker {worker_id}] Calling flash_client.invoke()...\n")
+@@ -255,15 +258,16 @@ async def flash_worker(state: DeepThinkState) -> dict:
+ 
+         if not codes and not searches and not scrapes:
+             writer({"event": "worker_stop", "worker": worker_id, "reason": "no_tools", "iteration": iteration})
+-            # If no final answer yet, add a prompt to continue
+-            if not has_final_answer(final_response):
++            # If no final answer yet, prompt once then stop to avoid loops
++            if not has_final_answer(final_response) and no_tool_prompt_count < 1:
+                 conversation.append(
+                     {
+                         "role": "user",
+-                        "content": "You haven't provided a FINAL answer. Please either output FINAL: followed by your answer, or continue working by searching/scrape/executing code.",
++                        "content": "You haven't provided a FINAL answer. Please either output FINAL: followed by your answer, or continue working by searching/scraping/executing code.",
+                     }
+                 )
+-                continue  # Try one more iteration instead of breaking
++                no_tool_prompt_count += 1
++                continue
+             break
+ 
+         tool_results = []
+@@ -315,6 +319,9 @@ async def flash_worker(state: DeepThinkState) -> dict:
+                         "timed_out": False,
+                     }
+                 )
++                # Only add to failed queries if search returned no results (not transient errors)
++                if search_result == "No results found.":
++                    local_failed_queries.add(query)
+                 tool_results.append(
+                     f"Search results for '{query}':\n{search_result[:5000]}"
+                 )
+@@ -379,4 +386,5 @@ async def flash_worker(state: DeepThinkState) -> dict:
+         ],
+         "execution_logs": execution_logs,
+         "failed_urls": local_failed_urls,
++        "failed_queries": list(local_failed_queries),
+     }

@@ -11,7 +11,7 @@ SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng:8080")
 SANDBOX_URL = os.environ.get("SANDBOX_URL", "http://code-sandbox:8000")
 FIRECRAWL_URL = os.environ.get("FIRECRAWL_URL", "http://firecrawl-api:3002")
 
-MAX_TOOL_ITERATIONS = 5
+MAX_TOOL_ITERATIONS = 10
 
 FLASH_SYSTEM = """You are a high-performance research worker. You have direct access to a Python sandbox, a Web Search engine, and a URL Scraper.
 
@@ -205,10 +205,13 @@ async def flash_worker(state: DeepThinkState) -> dict:
         {"role": "user", "content": prompt_text},
     ]
     execution_logs = []
-    used_queries = set(failed_queries)  # Start with global failed queries
+    # Only block last 50 failed queries to allow retry of transient failures
+    used_queries = set(failed_queries[-50:]) if failed_queries else set()
     final_response = ""
     worker_timed_out = False
     local_failed_urls = []
+    local_failed_queries = set()
+    no_tool_prompt_count = 0
 
     debug_log.write(f"[Worker {worker_id}] Conversation prepared. System length={len(system_with_memory)}, User length={len(prompt_text)}\n")
     debug_log.write(f"[Worker {worker_id}] Calling flash_client.invoke()...\n")
@@ -255,15 +258,16 @@ async def flash_worker(state: DeepThinkState) -> dict:
 
         if not codes and not searches and not scrapes:
             writer({"event": "worker_stop", "worker": worker_id, "reason": "no_tools", "iteration": iteration})
-            # If no final answer yet, add a prompt to continue
-            if not has_final_answer(final_response):
+            # If no final answer yet, prompt once then stop to avoid loops
+            if not has_final_answer(final_response) and no_tool_prompt_count < 1:
                 conversation.append(
                     {
                         "role": "user",
-                        "content": "You haven't provided a FINAL answer. Please either output FINAL: followed by your answer, or continue working by searching/scrape/executing code.",
+                        "content": "You haven't provided a FINAL answer. Please either output FINAL: followed by your answer, or continue working by searching/scraping/executing code.",
                     }
                 )
-                continue  # Try one more iteration instead of breaking
+                no_tool_prompt_count += 1
+                continue
             break
 
         tool_results = []
@@ -315,6 +319,9 @@ async def flash_worker(state: DeepThinkState) -> dict:
                         "timed_out": False,
                     }
                 )
+                # Only add to failed queries if search returned no results (not transient errors)
+                if search_result == "No results found.":
+                    local_failed_queries.add(query)
                 tool_results.append(
                     f"Search results for '{query}':\n{search_result[:5000]}"
                 )
@@ -379,4 +386,5 @@ async def flash_worker(state: DeepThinkState) -> dict:
         ],
         "execution_logs": execution_logs,
         "failed_urls": local_failed_urls,
+        "failed_queries": list(local_failed_queries),
     }

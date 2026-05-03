@@ -17,25 +17,16 @@ CRITICAL ASSESSMENT RULES:
 4. CONFLICT RESOLUTION: If you see a major domain contradiction, your PIVOT must be "Verify Primary Source." Ask the workers to find the official landing page, research paper, or author profile.
 5. NO HALLUCINATION: Do NOT fill in technical details from your memory to "fix" worker outputs. If they haven't found it, pivot them to find it.
 
-SOLVED STATE - TECHNICAL REPORT REQUIREMENTS:
-- When you reach SOLVED, your "final_answer" MUST be an exhaustive, elite technical report.
-- FORMAT: Use professional Markdown with clear sections.
-- MATHEMATICS: Use LaTeX (e.g., $x^2$ or $$E=mc^2$$) for all formulas.
-- CODE: Include any relevant algorithms or code snippets discovered.
-- ARCHITECTURE: Describe the system/logic in high-fidelity detail.
-- NO SUMMARIES: Never provide a high-level summary if technical details were discovered.
+DECISION CRITERIA:
+- SOLVED: Goal achieved with verified technical depth. All major technical questions answered with evidence.
+- RETRY: Small fixable errors or missing specific details that are likely findable.
+- PIVOT: Strategy change needed. If workers are stuck, give them a new tactical lead.
 
 Output must be valid JSON with this exact structure:
 {
   "status": "SOLVED" | "RETRY" | "PIVOT",
-  "critique": "Your Senior Engineer feedback. Be blunt, tactical, and helpful.",
-  "final_answer": "The exhaustive technical report (only if SOLVED). Use LaTeX and code blocks."
+  "critique": "Your Senior Engineer feedback. Summarize what has been found and what (if anything) is missing. If SOLVED, provide a brief concluding summary of the achievement."
 }
-
-Status guidelines:
-- SOLVED: Goal achieved with verified technical depth.
-- RETRY: Small fixable errors.
-- PIVOT: Strategy change needed. If workers are stuck, give them a new tactical lead.
 
 Return raw JSON only."""
 
@@ -73,7 +64,7 @@ def parse_json_response(content: str) -> dict:
                 # Fix invalid escapes for LaTeX: escape single backslashes before common commands
                 import re
                 # Replace \frac, \sum, \alpha, etc with \\frac, \\sum, \\alpha
-                json_string = re.sub(r'\\([a-zA-Z]+)', r'\\\\\1', json_string)
+                json_string = re.sub(r'(?<!\\)\\([a-zA-Z]+)', r'\\\\\1', json_string)
                 # Fix remaining invalid escapes: escape any backslash not followed by valid JSON escape
                 json_string = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_string)
                 try:
@@ -131,7 +122,11 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
             if final_match:
                 summary = f"FINAL: {final_match.group(1).strip()[:2000]}"
             else:
-                summary = resp[-2000:] if len(resp) > 2000 else resp
+                if len(resp) > 2000:
+                    # Preserve early evidence (URLs, sources) + late FINAL section
+                    summary = resp[:1000] + "\n...[TRUNCATED]...\n" + resp[-1000:]
+                else:
+                    summary = resp
             worker_id = out.get("worker_id", i)
             worker_type = out.get("prompt_type", "?")
             eval_parts.append(
@@ -186,11 +181,9 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
         data = parse_json_response(resp.content)
         status = data.get("status", "RETRY")
         critique = data.get("critique", "No critique provided")
-        final_answer = data.get("final_answer", None)
     except (json.JSONDecodeError, KeyError) as e:
         status = "RETRY"
         critique = f"Evaluator JSON parse failed: {str(e)}. Raw: [{resp.content[:200]}]"
-        final_answer = None
 
     writer({"event": "decision", "status": status, "reason": critique[:200], "loop": loop_count})
     print(f"[Evaluator] Status: {status}, Critique: {critique[:200]}", flush=True)
@@ -201,8 +194,5 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
         "evaluation_history": [critique],
         "loop_count": loop_count,
     }
-
-    if status == "SOLVED" and final_answer is not None:
-        result["final_answer"] = final_answer
 
     return result
