@@ -10,21 +10,23 @@ from nodes.advisor_synthesizer import advisor_synthesizer
 
 
 def route_to_workers(state: DeepThinkState) -> list[Send]:
+    prompts = state.get("flash_prompts", [])
+    print(f"[Graph] route_to_workers called with {len(prompts)} prompts, loop={state.get('loop_count', 0)}", flush=True)
+    if not prompts:
+        print(f"[Graph] WARNING: flash_prompts is empty!", flush=True)
     return [
         Send("flash_worker", {"worker_id": i, "prompt_data": p})
-        for i, p in enumerate(state["flash_prompts"])
+        for i, p in enumerate(prompts)
     ]
 
 
 def route_after_eval(state: DeepThinkState):
-    max_loops = int(os.environ.get("MAX_LOOPS", "3"))
+    max_loops = int(os.environ.get("MAX_LOOPS", "10"))
     status = state.get("status", "RETRY")
     loop = state.get("loop_count", 1)
-    print(f"[route_after_eval] Status: {status}, Loop: {loop}/{max_loops}", flush=True)
-    if status == "SOLVED":
+    
+    if status == "SOLVED" or loop >= max_loops:
         return "advisor_synthesizer"
-    elif loop >= max_loops:
-        return END
     elif status == "PIVOT":
         return "advisor_planner"
     else:

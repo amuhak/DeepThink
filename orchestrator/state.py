@@ -19,6 +19,10 @@ class DeepThinkState(TypedDict):
     execution_logs: Annotated[list[ExecutionLog], operator.add]
     evaluation_history: Annotated[list[str], operator.add]
 
+    # Global memory across loops - avoid repeating failed searches/URLs
+    failed_urls: Annotated[list[str], operator.add]
+    failed_queries: Annotated[list[str], operator.add]
+
     status: Literal["SOLVED", "RETRY", "PIVOT", "RUNNING"]
     loop_count: int
     final_answer: str

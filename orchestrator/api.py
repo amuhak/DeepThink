@@ -89,58 +89,46 @@ async def run_streaming(
 
                 if event == "token":
                     source = data.get("source", "?")
-                    text = data.get("text", "")
-                    if thinking_open:
+                    if not thinking_open:
+                        yield build_sse_chunk(chunk_id, data.get("text", ""))
+                    elif source in ["Planner", "Evaluator"]:
                         if last_source != source:
-                            yield build_sse_chunk(chunk_id, f"\n\n[{source}] {text}")
+                            yield build_sse_chunk(chunk_id, f"\n\n[{source} Thinking] ")
                             last_source = source
-                        else:
-                            yield build_sse_chunk(chunk_id, text)
-                    else:
-                        yield build_sse_chunk(chunk_id, text)
+                        yield build_sse_chunk(chunk_id, data.get("text", ""))
                 elif event == "planning":
-                    last_source = None
-                    yield build_sse_chunk(chunk_id, "\n[Planning strategy...]\n")
+                    pass
                 elif event == "flash_start":
-                    last_source = None
-                    wid = data.get("worker", 0)
-                    yield build_sse_chunk(chunk_id, f"\n[Worker {wid} started...]\n")
+                    pass
                 elif event == "code_executing":
-                    last_source = None
                     wid = data.get("worker", 0)
                     yield build_sse_chunk(
-                        chunk_id, f"\n[Worker {wid} executing code...]\n"
+                        chunk_id, f"\n- [Worker {wid}] Executing code...\n"
                     )
                 elif event == "searching":
-                    last_source = None
                     wid = data.get("worker", 0)
                     query = data.get("query", "")
                     yield build_sse_chunk(
-                        chunk_id, f"\n[Worker {wid} searching: {query}...]\n"
+                        chunk_id, f"\n- [Worker {wid}] Searching: {query}...\n"
                     )
                 elif event == "scraping":
-                    last_source = None
                     wid = data.get("worker", 0)
                     url = data.get("url", "")
                     yield build_sse_chunk(
-                        chunk_id, f"\n[Worker {wid} scraping: {url}...]\n"
+                        chunk_id, f"\n- [Worker {wid}] Scraping: {url}...\n"
                     )
                 elif event == "flash_done":
-                    last_source = None
-                    wid = data.get("worker", 0)
-                    yield build_sse_chunk(chunk_id, f"\n[Worker {wid} complete]\n")
+                    pass
                 elif event == "evaluating":
-                    last_source = None
-                    yield build_sse_chunk(chunk_id, "\n[Evaluating results...]\n")
+                    pass
                 elif event == "decision":
-                    last_source = None
                     status = data.get("status", "?")
-                    reason = data.get("reason", "")
-                    yield build_sse_chunk(
-                        chunk_id, f"\n[Decision: {status}] {reason[:150]}\n"
-                    )
+                    loop = data.get("loop", 0)
+                    if status != "SOLVED":
+                        yield build_sse_chunk(
+                            chunk_id, f"\n- [Loop {loop} Ended] Status: {status} (Next step: {data.get('reason', '')[:60]}...)\n"
+                        )
                 elif event == "synthesizing":
-                    last_source = None
                     if thinking_open:
                         yield build_sse_chunk(chunk_id, "\n</thinking>\n\n")
                         thinking_open = False

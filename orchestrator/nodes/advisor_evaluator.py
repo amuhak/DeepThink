@@ -48,21 +48,46 @@ def parse_json_response(content: str) -> dict:
         if content.startswith("json"):
             content = content[4:]
         content = content.strip()
-    # Find first { and matching }
+    # Find first [ or {
+    start_char = None
     brace_start = content.find("{")
-    if brace_start < 0:
+    bracket_start = content.find("[")
+    if bracket_start >= 0 and (brace_start < 0 or bracket_start < brace_start):
+        start_char = "["
+        start_pos = bracket_start
+    else:
+        start_char = "{"
+        start_pos = brace_start if brace_start >= 0 else -1
+    if start_pos < 0:
         raise json.JSONDecodeError("No JSON object found", content, 0)
-    # Track nested braces to find matching closing brace
+    # Track nested braces/brackets to find matching closing
     depth = 0
-    for i in range(brace_start, len(content)):
-        if content[i] == "{":
+    for i in range(start_pos, len(content)):
+        if content[i] in "{[":
             depth += 1
-        elif content[i] == "}":
+        elif content[i] in "}]":
             depth -= 1
             if depth == 0:
                 brace_end = i
-                return json.loads(content[brace_start : brace_end + 1])
-    raise json.JSONDecodeError("No matching closing brace", content, brace_start)
+                json_string = content[start_pos : brace_end + 1]
+                # Fix invalid escapes for LaTeX: escape single backslashes before common commands
+                import re
+                # Replace \frac, \sum, \alpha, etc with \\frac, \\sum, \\alpha
+                json_string = re.sub(r'\\([a-zA-Z]+)', r'\\\\\1', json_string)
+                # Fix remaining invalid escapes: escape any backslash not followed by valid JSON escape
+                json_string = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_string)
+                try:
+                    return json.loads(json_string, strict=False)
+                except json.JSONDecodeError:
+                    # Try alternative: replace all backslashes with double backslashes
+                    json_string = json_string.replace("\\", "\\\\")
+                    try:
+                        return json.loads(json_string, strict=False)
+                    except:
+                        # Last resort: strip non-printable chars and try again
+                        json_string = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_string)
+                        return json.loads(json_string, strict=False)
+    raise json.JSONDecodeError("No matching closing brace", content, start_pos)
 
 
 async def advisor_evaluator(state: DeepThinkState) -> dict:
@@ -70,8 +95,7 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
     writer({"event": "evaluating", "loop": state.get("loop_count", 0)})
 
     def on_token(chunk, is_reasoning=False):
-        if not is_reasoning:
-            writer({"event": "token", "source": "Evaluator", "text": chunk})
+        writer({"event": "token", "source": "Evaluator", "text": chunk})
 
     messages = [
         {"role": "system", "content": EVALUATOR_SYSTEM},
@@ -84,6 +108,9 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
         history = state["chat_history"]
         if history and history[-1]["content"] == state["user_prompt"]:
             history = history[:-1]
+
+        # Compact context: only keep the last 4 messages of history
+        history = history[-4:]
 
         if history:
             history_str = "\n".join(
@@ -117,7 +144,7 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
         for i, log in enumerate(state["execution_logs"][-3:]):
             worker_id = log.get("worker_id", "?")
             eval_parts.append(
-                f"Log {i} (W{worker_id}): exit={log.get('exit_code', '?')} stdout={log.get('stdout', '')[:100]}"
+                f"Log {i} (W{worker_id}): exit={log.get('exit_code', '?')} stdout={log.get('stdout', '')[:2500]}"
             )
 
     if state.get("evaluation_history"):
@@ -144,9 +171,11 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
         repetition_penalty=1.0,
     )
 
+    loop_count = state.get("loop_count", 0) + 1
+    
     if resp.timed_out:
         writer(
-            {"event": "decision", "status": "RETRY", "reason": "Evaluator timed out"}
+            {"event": "decision", "status": "RETRY", "reason": "Evaluator timed out", "loop": loop_count}
         )
         return {
             "status": "RETRY",
@@ -163,14 +192,14 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
         critique = f"Evaluator JSON parse failed: {str(e)}. Raw: [{resp.content[:200]}]"
         final_answer = None
 
-    writer({"event": "decision", "status": status, "reason": critique[:200]})
+    writer({"event": "decision", "status": status, "reason": critique[:200], "loop": loop_count})
     print(f"[Evaluator] Status: {status}, Critique: {critique[:200]}", flush=True)
     print(f"[Evaluator] Raw response length: {len(resp.content)}", flush=True)
 
     result = {
         "status": status,
         "evaluation_history": [critique],
-        "loop_count": state.get("loop_count", 0) + 1,
+        "loop_count": loop_count,
     }
 
     if status == "SOLVED" and final_answer is not None:

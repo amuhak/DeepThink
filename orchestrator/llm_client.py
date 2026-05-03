@@ -23,7 +23,8 @@ class LLMClient:
         self.timeout = timeout
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=httpx.Timeout(timeout, connect=10.0),
+            # None = no absolute request timeout. read = idle timeout between bytes.
+            timeout=httpx.Timeout(None, read=float(timeout), connect=10.0),
             limits=httpx.Limits(max_connections=10),
         )
 
@@ -63,10 +64,22 @@ class LLMClient:
 
     async def _request(self, payload: dict, on_token=None) -> LLMResponse:
         payload["stream"] = True
+
+        # Debug logging
+        import os
+        debug_mode = os.environ.get("DEBUG_LLM", "0") == "1"
+        if debug_mode:
+            print(f"[LLM Client] URL: {self.base_url}/chat/completions")
+            print(f"[LLM Client] Model: {self.model}")
+            print(f"[LLM Client] Payload messages count: {len(payload.get('messages', []))}")
+
         try:
             async with self.client.stream(
                 "POST", "/chat/completions", json=payload
             ) as resp:
+                if debug_mode:
+                    print(f"[LLM Client] Response status: {resp.status_code}")
+
                 if resp.status_code == 200:
                     content = ""
                     reasoning = ""
@@ -106,9 +119,9 @@ class LLMClient:
                         partial=f"HTTP {resp.status_code}: {err_text.decode('utf-8', errors='ignore')[:200]}",
                     )
         except httpx.TimeoutException:
-            return LLMResponse(content="", timed_out=True, partial="")
+            return LLMResponse(content="[TIMEOUT] Worker timed out", timed_out=True, partial="")
         except Exception as e:
-            return LLMResponse(content="", timed_out=False, partial=f"Error: {str(e)}")
+            return LLMResponse(content=f"[WORKER ERROR: {str(e)}]", timed_out=False, partial=f"Error: {str(e)}")
 
     async def invoke_json(
         self,
@@ -186,9 +199,9 @@ class LLMClient:
                         partial=f"HTTP {resp.status_code}: {err_text.decode('utf-8', errors='ignore')[:200]}",
                     )
         except httpx.TimeoutException:
-            return LLMResponse(content="", timed_out=True, partial="")
+            return LLMResponse(content="[TIMEOUT] Worker timed out", timed_out=True, partial="")
         except Exception as e:
-            return LLMResponse(content="", timed_out=False, partial=f"Error: {str(e)}")
+            return LLMResponse(content=f"[WORKER ERROR: {str(e)}]", timed_out=False, partial=f"Error: {str(e)}")
 
     async def close(self):
         await self.client.aclose()

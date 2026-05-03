@@ -27,13 +27,14 @@ TOOL RULES:
    your search query here
    ```
 3. SCRAPE: To read the full content of a specific URL (arXiv, GitHub, documentation), use:
-   ```scrape
-   https://example.com/target-page
-   ```
+    ```scrape
+    https://example.com/target-page
+    ```
    **CRITICAL:** Use SCRAPE whenever you find a promising technical link to get full math, code, and details.
+   **PDF WARNING:** When searching for academic papers, prefer HTML versions (e.g., arXiv abstract page, Scholar, conference website) over PDF links. PDFs often lose LaTeX math formatting - even pdf-inspector cannot reconstruct proper equations from font glyphs. Look for URLs like `arxiv.org/abs/...` instead of `arxiv.org/pdf/...`.
 
 4. EXECUTION IS REAL: Do NOT simulate or "thought-block" your tools.
-5. NO LOOPING: If you have tried searching/scraping twice with no results, admit it and output your FINAL summary.
+5. NO LOOPING: If you have tried searching/scraping twice with no results and you have no more ideas/options, admit it and output your FINAL summary.
 
 OUTPUT FORMAT:
 - Briefly think step-by-step.
@@ -89,6 +90,13 @@ async def run_code(code: str, worker_id: int) -> dict:
 
 
 async def run_search(query: str, worker_id: int) -> str:
+    # Add paywall exclusions for academic queries
+    academic_keywords = ["paper", "research", "algorithm", "equation", "model", "theorem", "proof", "academic", "journal", "publication"]
+    if any(kw in query.lower() for kw in academic_keywords):
+        # Exclude major paywall sites
+        exclusions = " -site:sciencedirect.com -site:elsevier.com -site:springer.com -site:nature.com -site:ieee.com -site:acm.org"
+        query = query + exclusions
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(
@@ -148,17 +156,62 @@ async def flash_worker(state: DeepThinkState) -> dict:
     prompt_text = prompt_data.get("text", "")
     prompt_type = prompt_data.get("type", "prove")
 
+    # Global memory from previous loops
+    failed_urls = state.get("failed_urls", [])
+    failed_queries = state.get("failed_queries", [])
+
+    # Debug logging
+    debug_log = open(f"/tmp/worker_{worker_id}_debug.log", "w")
+    debug_log.write(f"[Worker {worker_id}] START - prompt_type={prompt_type}, prompt_length={len(prompt_text)}\n")
+
+    # Get config from environment
+    import os
+    flash_llm_url = os.environ.get("FLASH_LLM_URL", "NOT SET")
+    flash_model = os.environ.get("FLASH_MODEL", "NOT SET")
+    debug_log.write(f"[Worker {worker_id}] FLASH_LLM_URL={flash_llm_url}\n")
+    debug_log.write(f"[Worker {worker_id}] FLASH_MODEL={flash_model}\n")
+
+    # Health check: test if FLASH_LLM_URL is reachable
+    if flash_llm_url != "NOT SET":
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                test_resp = await client.get(flash_llm_url.replace("/v1", "/models"))
+                debug_log.write(f"[Worker {worker_id}] Health check status: {test_resp.status_code}\n")
+                if test_resp.status_code == 200:
+                    debug_log.write(f"[Worker {worker_id}] Health check OK: {test_resp.text[:200]}\n")
+                else:
+                    debug_log.write(f"[Worker {worker_id}] Health check FAILED: {test_resp.status_code} - {test_resp.text[:200]}\n")
+        except Exception as e:
+            debug_log.write(f"[Worker {worker_id}] Health check ERROR: {str(e)}\n")
+    else:
+        debug_log.write(f"[Worker {worker_id}] FLASH_LLM_URL not set, skipping health check\n")
+
     writer = get_stream_writer()
     writer({"event": "flash_start", "worker": worker_id, "type": prompt_type})
 
+    # Add context about what to avoid
+    avoidance_context = ""
+    if failed_urls:
+        avoidance_context += f"\n\nDO NOT visit these URLs (they failed previously):\n" + "\n".join(failed_urls[:10])
+    if failed_queries:
+        avoidance_context += f"\n\nDO NOT search for these exact queries (they failed previously):\n" + "\n".join(failed_queries[:10])
+
+    system_with_memory = FLASH_SYSTEM
+    if avoidance_context:
+        system_with_memory = FLASH_SYSTEM + "\n\n" + avoidance_context
+
     conversation = [
-        {"role": "system", "content": FLASH_SYSTEM},
+        {"role": "system", "content": system_with_memory},
         {"role": "user", "content": prompt_text},
     ]
     execution_logs = []
-    used_queries = set()
+    used_queries = set(failed_queries)  # Start with global failed queries
     final_response = ""
     worker_timed_out = False
+    local_failed_urls = []
+
+    debug_log.write(f"[Worker {worker_id}] Conversation prepared. System length={len(system_with_memory)}, User length={len(prompt_text)}\n")
+    debug_log.write(f"[Worker {worker_id}] Calling flash_client.invoke()...\n")
 
     def on_token(chunk, is_reasoning=False):
         writer({"event": "token", "source": f"Worker {worker_id}", "text": chunk})
@@ -175,6 +228,10 @@ async def flash_worker(state: DeepThinkState) -> dict:
             repetition_penalty=1.0,
         )
 
+        debug_log.write(f"[Worker {worker_id}] LLM response received: timed_out={resp.timed_out}, content_length={len(resp.content) if resp.content else 0}\n")
+        debug_log.write(f"[Worker {worker_id}] Content preview: {repr(resp.content[:200]) if resp.content else 'EMPTY'}\n")
+        debug_log.write(f"[Worker {worker_id}] Partial preview: {repr(resp.partial[:200]) if resp.partial else 'None'}\n")
+
         if resp.timed_out:
             writer(
                 {"event": "flash_timeout", "worker": worker_id, "iteration": iteration}
@@ -189,6 +246,7 @@ async def flash_worker(state: DeepThinkState) -> dict:
         conversation.append({"role": "assistant", "content": resp.content})
 
         if has_final_answer(resp.content):
+            writer({"event": "worker_stop", "worker": worker_id, "reason": "FINAL_marker", "iteration": iteration})
             break
 
         codes = extract_code_blocks(resp.content)
@@ -196,6 +254,16 @@ async def flash_worker(state: DeepThinkState) -> dict:
         scrapes = extract_scrape_urls(resp.content)
 
         if not codes and not searches and not scrapes:
+            writer({"event": "worker_stop", "worker": worker_id, "reason": "no_tools", "iteration": iteration})
+            # If no final answer yet, add a prompt to continue
+            if not has_final_answer(final_response):
+                conversation.append(
+                    {
+                        "role": "user",
+                        "content": "You haven't provided a FINAL answer. Please either output FINAL: followed by your answer, or continue working by searching/scrape/executing code.",
+                    }
+                )
+                continue  # Try one more iteration instead of breaking
             break
 
         tool_results = []
@@ -209,6 +277,7 @@ async def flash_worker(state: DeepThinkState) -> dict:
             used_queries.add(q)
 
         if repetitive:
+            writer({"event": "worker_stop", "worker": worker_id, "reason": "repetitive_tool", "iteration": iteration})
             tool_results.append(
                 "ERROR: Repetitive tool call detected. You are repeating a query that already failed or yielded no new info. Please STOP and provide your FINAL summary based on what you already found."
             )
@@ -253,6 +322,13 @@ async def flash_worker(state: DeepThinkState) -> dict:
             for url in scrapes:
                 writer({"event": "scraping", "worker": worker_id, "url": url})
                 scrape_result = await run_scrape(url, worker_id)
+
+                # Track failed URLs (paywalls, errors, empty results)
+                failure_indicators = ["error", "blocked", "paywall", "403", "forbidden", "requires authentication", "access denied", "too short"]
+                is_failure = any(indicator in scrape_result.lower() for indicator in failure_indicators) or len(scrape_result) < 100
+                if is_failure:
+                    local_failed_urls.append(url)
+
                 execution_logs.append(
                     {
                         "worker_id": worker_id,
@@ -278,8 +354,19 @@ async def flash_worker(state: DeepThinkState) -> dict:
             break
 
     output_text = final_response if has_final_answer(final_response) else final_response
+    # Fallback: if output is empty or just whitespace, add error context
+    if not output_text or not output_text.strip():
+        output_text = "[WORKER produced no output - likely API failure or timeout]"
+
+    # Log if we hit max iterations without explicit stop
+    if not has_final_answer(final_response) and not worker_timed_out:
+        writer({"event": "worker_stop", "worker": worker_id, "reason": "max_iterations", "iteration": MAX_TOOL_ITERATIONS - 1})
 
     writer({"event": "flash_done", "worker": worker_id, "type": prompt_type})
+
+    debug_log.write(f"[Worker {worker_id}] END - output_length={len(output_text)}, timed_out={worker_timed_out}\n")
+    debug_log.write(f"[Worker {worker_id}] Output preview: {repr(output_text[:200])}\n")
+    debug_log.close()
 
     return {
         "flash_outputs": [
@@ -291,4 +378,5 @@ async def flash_worker(state: DeepThinkState) -> dict:
             }
         ],
         "execution_logs": execution_logs,
+        "failed_urls": local_failed_urls,
     }

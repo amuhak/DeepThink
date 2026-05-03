@@ -85,6 +85,7 @@ search:
   formats:
     - html
     - json
+  max_results: 10
 
 server:
   # Is overwritten by ${SEARXNG_PORT} and ${SEARXNG_BIND_ADDRESS}

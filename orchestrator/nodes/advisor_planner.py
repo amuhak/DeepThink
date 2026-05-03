@@ -61,7 +61,13 @@ def parse_json_response(content: str) -> dict:
             depth -= 1
             if depth == 0:
                 brace_end = i
-                return json.loads(content[brace_start : brace_end + 1])
+                json_string = content[brace_start : brace_end + 1]
+                import re
+                # Fix LaTeX: escape single backslashes before common commands
+                json_string = re.sub(r'\\([a-zA-Z]+)', r'\\\\\1', json_string)
+                # Fix remaining invalid escapes
+                json_string = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_string)
+                return json.loads(json_string, strict=False)
     # Try to fix truncated JSON by adding missing braces
     truncated = content[brace_start:]
     while depth > 0:
@@ -98,6 +104,9 @@ async def advisor_planner(state: DeepThinkState) -> dict:
         if history and history[-1]["content"] == state["user_prompt"]:
             history = history[:-1]
 
+        # Compact context: only keep the last 4 messages of history
+        history = history[-4:]
+
         if history:
             history_str = "\n".join(
                 [f"{m['role'].upper()}: {m['content']}" for m in history]
@@ -125,8 +134,7 @@ async def advisor_planner(state: DeepThinkState) -> dict:
         f.write("[Planner] Calling LLM...\n")
 
     def on_token(chunk, is_reasoning=False):
-        if not is_reasoning:
-            writer({"event": "token", "source": "Planner", "text": chunk})
+        writer({"event": "token", "source": "Planner", "text": chunk})
 
     resp = await pro_client.invoke_json(
         messages,

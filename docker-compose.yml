@@ -71,6 +71,8 @@ services:
       - PLAYWRIGHT_MICROSERVICE_URL=http://playwright-service:3000/scrape
       - USE_DB_AUTHENTICATION=false
       - SELF_HOSTED=true
+      - PDF_RUST_EXTRACT_ENABLE=true
+      - MINERU_PERCENT=0
     ports:
       - "3002:3002"
     depends_on:
@@ -81,15 +83,15 @@ services:
     restart: unless-stopped
 
   openwebui:
-    image: ghcr.io/open-webui/open-webui:main
+    build: ./openwebui
     container_name: deep-think-openwebui
     ports:
       - "3000:8080"
     volumes:
       - open-webui:/app/backend/data
     environment:
-      - OPENAI_API_BASE_URLS=http://orchestrator:8000/v1;https://chatfast.amuhak.com/v1
-      - OPENAI_API_KEYS=deepthink;fastchat_key
+      - OPENAI_API_BASE_URLS=http://orchestrator:8000/v1;http://100.82.53.76:8000;${PRO_LLM_URL:-https://llm.amuhak.com/v1};${FLASH_LLM_URL:-https://llm.prnt.ink/v1}
+      - OPENAI_API_KEYS=deepthink;fastchat_key;pro_key;flash_key
       - ENABLE_RAG_WEB_SEARCH=True
       - RAG_WEB_SEARCH_ENGINE=searxng
       - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>

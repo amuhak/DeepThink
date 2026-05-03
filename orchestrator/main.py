@@ -50,49 +50,6 @@ async def list_models():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest):
-    # Route direct model requests bypassing the orchestrator
-    if req.model in ["pro", "flash"]:
-        client = pro_client if req.model == "pro" else flash_client
-        messages = [{"role": m.role, "content": m.content} for m in req.messages]
-
-        if req.stream:
-
-            async def direct_stream():
-                payload = {
-                    "model": client.model,
-                    "messages": messages,
-                    "stream": True,
-                }
-                async with client.client.stream(
-                    "POST", "/chat/completions", json=payload
-                ) as resp:
-                    async for line in resp.aiter_lines():
-                        if line:
-                            yield f"{line}\n\n"
-
-            return StreamingResponse(direct_stream(), media_type="text/event-stream")
-        else:
-            resp = await client.invoke(messages)
-            chunk_id = str(uuid.uuid4())
-            return JSONResponse(
-                content={
-                    "id": chunk_id,
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": req.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": resp.content,
-                            },
-                            "finish_reason": "stop",
-                        }
-                    ],
-                }
-            )
-
     user_prompt = extract_user_prompt(req.messages)
 
     if not user_prompt:
