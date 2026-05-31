@@ -121,6 +121,9 @@ async def run_streaming(
                             yield build_sse_chunk(chunk_id, f"\n\n[{source} Thinking] ")
                             last_source = source
                         yield build_sse_chunk(chunk_id, text)
+                    else:
+                        # Send keep-alive SSE comments for worker tokens to prevent connection timeouts
+                        yield ": keep-alive\n\n"
                 elif event == "planning":
                     pass
                 elif event == "flash_start":
@@ -257,19 +260,14 @@ async def run_flash_agent_stream(
             continue
             
         event = data.get("event", "")
-        if event == "token":
-            source = data.get("source", "?")
+        if event == "state_change":
+            state = data.get("state", "")
+            if state == "synthesizing" and thinking_open:
+                yield build_sse_chunk(chunk_id, "\n</thinking>\n\n")
+                thinking_open = False
+        elif event == "token":
             text = data.get("text", "")
-            is_reasoning = data.get("is_reasoning", False)
-            
-            if is_reasoning:
-                if thinking_open:
-                    yield build_sse_chunk(chunk_id, text)
-            else:
-                if thinking_open:
-                    yield build_sse_chunk(chunk_id, "\n</thinking>\n\n")
-                    thinking_open = False
-                yield build_sse_chunk(chunk_id, text)
+            yield build_sse_chunk(chunk_id, text)
         elif event == "usage":
             u = data.get("usage", {})
             total_usage["prompt_tokens"] += u.get("prompt_tokens", 0)

@@ -9,8 +9,9 @@ from openai import AsyncOpenAI
 class ToolCallStreamFilter:
     def __init__(self, on_token_callback):
         self.on_token = on_token_callback
-        self.state = "NORMAL"  # "NORMAL", "CHECKING_START", "SUPPRESSING", "CHECKING_END"
+        self.state = "NORMAL"  # "NORMAL", "CHECKING_START", "BUFFERING_BLOCK", "CHECKING_END"
         self.buffer = ""
+        self.block_buffer = ""
 
     def process(self, text: str, is_reasoning: bool):
         if not self.on_token:
@@ -29,7 +30,8 @@ class ToolCallStreamFilter:
                 target = "<tool_call>"
                 if target.startswith(self.buffer):
                     if self.buffer == target:
-                        self.state = "SUPPRESSING"
+                        self.state = "BUFFERING_BLOCK"
+                        self.block_buffer = "<tool_call>"
                         self.buffer = ""
                 else:
                     for c in self.buffer:
@@ -37,30 +39,50 @@ class ToolCallStreamFilter:
                     self.state = "NORMAL"
                     self.buffer = ""
 
-            elif self.state == "SUPPRESSING":
+            elif self.state == "BUFFERING_BLOCK":
+                self.block_buffer += char
                 if char == "<":
                     self.state = "CHECKING_END"
                     self.buffer = "<"
-                else:
-                    pass
 
             elif self.state == "CHECKING_END":
                 self.buffer += char
                 target = "</tool_call>"
                 if target.startswith(self.buffer):
                     if self.buffer == target:
-                        self.state = "NORMAL"
+                        full_block = self.block_buffer + self.buffer
+                        inner_content = self.block_buffer[11:].strip()
+                        is_tool_call = False
+                        try:
+                            parsed = json.loads(inner_content)
+                            if isinstance(parsed, dict) and "name" in parsed:
+                                is_tool_call = True
+                        except Exception:
+                            pass
+                        
+                        if not is_tool_call:
+                            # Flush the entire block because it is literal explanation/text
+                            for c in full_block:
+                                self.on_token(c, is_reasoning)
+                        
                         self.buffer = ""
+                        self.block_buffer = ""
+                        self.state = "NORMAL"
                 else:
-                    self.state = "SUPPRESSING"
+                    self.block_buffer += self.buffer
                     self.buffer = ""
+                    self.state = "BUFFERING_BLOCK"
 
     def flush(self, is_reasoning: bool = False):
         if self.state == "CHECKING_START" and self.buffer:
             for c in self.buffer:
                 self.on_token(c, is_reasoning)
-            self.buffer = ""
-            self.state = "NORMAL"
+        elif self.state in ["BUFFERING_BLOCK", "CHECKING_END"]:
+            for c in self.block_buffer + self.buffer:
+                self.on_token(c, is_reasoning)
+        self.buffer = ""
+        self.block_buffer = ""
+        self.state = "NORMAL"
 
 
 PRO_LLM_URL = os.environ.get("PRO_LLM_URL", "https://llm.amuhak.com/v1")
@@ -225,9 +247,39 @@ class LLMClient:
                 if len(content.strip()) < 10 and reasoning.strip():
                     content = reasoning
 
-                # Clean raw tool call blocks from content and reasoning to prevent final leak
-                content = re.sub(r"<tool_call>.*?</tool_call>", "", content, flags=re.DOTALL)
-                reasoning = re.sub(r"<tool_call>.*?</tool_call>", "", reasoning, flags=re.DOTALL)
+                def clean_tool_calls(text: str, actual_tool_calls: list[dict]) -> str:
+                    if not actual_tool_calls:
+                        return text
+                    pattern = r"<tool_call>(.*?)</tool_call>"
+                    def replace_fn(match):
+                        inner_text = match.group(1).strip()
+                        try:
+                            parsed = json.loads(inner_text)
+                            parsed_name = parsed.get("name")
+                            parsed_args = parsed.get("arguments", {})
+                            if isinstance(parsed_args, str):
+                                try:
+                                    parsed_args = json.loads(parsed_args)
+                                except Exception:
+                                    pass
+                            for tc in actual_tool_calls:
+                                func_data = tc.get("function", {})
+                                if parsed_name == func_data.get("name"):
+                                    actual_args = func_data.get("arguments", {})
+                                    if isinstance(actual_args, str):
+                                        try:
+                                            actual_args = json.loads(actual_args)
+                                        except Exception:
+                                            pass
+                                    if parsed_args == actual_args:
+                                        return ""
+                        except Exception:
+                            pass
+                        return match.group(0)
+                    return re.sub(pattern, replace_fn, text, flags=re.DOTALL)
+
+                content = clean_tool_calls(content, tool_calls)
+                reasoning = clean_tool_calls(reasoning, tool_calls)
 
                 return LLMResponse(
                     content=content,

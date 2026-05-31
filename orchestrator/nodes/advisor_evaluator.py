@@ -115,12 +115,29 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
     if state.get("flash_outputs"):
         eval_parts.append("## Worker Outputs")
         current_worker_count = len(state.get("flash_prompts", []))
-        current_outputs = state["flash_outputs"][-current_worker_count:] if current_worker_count else state["flash_outputs"]
+        
+        # Selectively gather the standard worker outputs and PDF vision outputs for the current loop
+        standard_outputs = []
+        pdf_vision_outputs = []
+        for out in reversed(state["flash_outputs"]):
+            worker_id = str(out.get("worker_id", ""))
+            if worker_id.startswith("pdf_vision"):
+                pdf_vision_outputs.append(out)
+            else:
+                if len(standard_outputs) < current_worker_count:
+                    standard_outputs.append(out)
+                else:
+                    # We have retrieved all standard workers for the current loop; older items belong to prior loops
+                    break
+        
+        # Combine in chronological order
+        current_outputs = list(reversed(standard_outputs)) + list(reversed(pdf_vision_outputs))
+        
         for i, out in enumerate(current_outputs):
             resp = out.get("response", "No output")
             import re
 
-            final_match = re.search(r"^FINAL:\s*(.*)", resp, re.MULTILINE)
+            final_match = re.search(r"^FINAL:\s*(.*)", resp, re.MULTILINE | re.DOTALL)
             if final_match:
                 summary = f"FINAL: {final_match.group(1).strip()[:2000]}"
             else:

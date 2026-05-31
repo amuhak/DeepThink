@@ -138,7 +138,7 @@ async def process_single_pdf(
         # Forward token stream to UI
         writer({"event": "token", "source": f"PDF Processor {idx}", "text": chunk})
 
-    # Acquire semaphore to enforce at most 4 parallel LLM requests
+    # Acquire semaphore to enforce at most 2 parallel LLM requests
     async with semaphore:
         resp = await pro_client.invoke(
             messages=messages,
@@ -177,8 +177,8 @@ async def pdf_processor(state: DeepThinkState) -> dict:
     debug_log = open("/tmp/pdf_processor_debug.log", "w")
     debug_log.write(f"[PDF Processor] START - Pending count: {len(pending)}\n")
 
-    # Enforce maximum of 4 parallel requests
-    semaphore = asyncio.Semaphore(4)
+    # Enforce maximum of 2 parallel LLM requests to balance speed and VRAM safety
+    semaphore = asyncio.Semaphore(2)
     tasks = [
         process_single_pdf(item, i, semaphore, writer, debug_log)
         for i, item in enumerate(pending)

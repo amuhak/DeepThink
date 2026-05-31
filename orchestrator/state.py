@@ -22,6 +22,15 @@ def reduce_usage(left: UsageStats | None, right: UsageStats | None) -> UsageStat
     }
 
 
+def reduce_pending_pdfs(left: list[dict] | None, right: list[dict] | None) -> list[dict]:
+    if right is None:
+        return left or []
+    # If the update is explicitly an empty list, it means we are clearing the queue
+    if isinstance(right, list) and len(right) == 0:
+        return []
+    return (left or []) + right
+
+
 class DeepThinkState(TypedDict):
     user_prompt: str
     chat_history: list[dict]  # [{"role": str, "content": str}]
@@ -36,7 +45,7 @@ class DeepThinkState(TypedDict):
     # Global memory across loops - avoid repeating failed searches/URLs
     failed_urls: Annotated[list[str], operator.add]
     failed_queries: Annotated[list[str], operator.add]
-    pending_pdfs: Annotated[list[dict], operator.add]
+    pending_pdfs: Annotated[list[dict], reduce_pending_pdfs]
 
     status: Literal["SOLVED", "RETRY", "PIVOT", "RUNNING"]
     loop_count: int

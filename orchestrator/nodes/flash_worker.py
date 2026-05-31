@@ -12,7 +12,7 @@ SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng:8080")
 SANDBOX_URL = os.environ.get("SANDBOX_URL", "http://code-sandbox:8000")
 FIRECRAWL_URL = os.environ.get("FIRECRAWL_URL", "http://firecrawl-api:3002")
 
-MAX_TOOL_ITERATIONS = 10
+MAX_TOOL_ITERATIONS = 15
 
 FLASH_SYSTEM = """You are a high-performance research worker. You have direct access to a Python sandbox, a Web Search engine, and a URL Scraper.
 
@@ -266,6 +266,8 @@ async def flash_worker(state: DeepThinkState) -> dict:
     local_pending_pdfs = []
     no_tool_prompt_count = 0
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    max_tool_executions = 9
+    tool_executions_count = 0
 
     debug_log.write(f"[Worker {worker_id}] Conversation prepared. System length={len(system_with_memory)}, User length={len(prompt_text)}\n")
 
@@ -273,9 +275,19 @@ async def flash_worker(state: DeepThinkState) -> dict:
         writer({"event": "token", "source": f"Worker {worker_id}", "text": chunk})
 
     for iteration in range(MAX_TOOL_ITERATIONS):
+        if tool_executions_count >= max_tool_executions:
+            supported_tools = []
+            if not any(msg.get("role") == "user" and "quota has been exhausted" in msg.get("content", "") for msg in conversation):
+                conversation.append({
+                    "role": "user",
+                    "content": "SYSTEM WARNING: Your maximum tool execution quota of 9 calls has been exhausted. You cannot call any more tools. You MUST immediately write your final response now starting with the line 'FINAL:' followed by your complete summary using the information gathered so far."
+                })
+        else:
+            supported_tools = TOOLS
+
         resp = await flash_client.invoke(
             conversation,
-            tools=TOOLS,
+            tools=supported_tools,
             on_token=on_token,
             temperature=0.6,
         )
@@ -359,6 +371,8 @@ async def flash_worker(state: DeepThinkState) -> dict:
             name = tc["function"]["name"]
             arguments_str = tc["function"]["arguments"]
             call_id = tc["id"]
+            
+            tool_executions_count += 1
 
             try:
                 args = json.loads(arguments_str)
@@ -430,6 +444,30 @@ async def flash_worker(state: DeepThinkState) -> dict:
                 "name": name,
                 "content": result_str
             })
+
+    # Final Synthesis Safeguard for Workers: Ensure fanned-out workers ALWAYS yield a visible FINAL answer.
+    # If the ReAct loop ended naturally or due to exhaustion, but we only streamed reasoning
+    # tokens (or final_response does not contain 'FINAL:'), force one last non-tool invocation.
+    if not has_final_answer(final_response) or not final_response.strip():
+        conversation.append({
+            "role": "user",
+            "content": "You have completed your research. Please compile and write your final response now. Remember, your final response MUST start with 'FINAL:' on its own line, followed by your complete answer. Do NOT call any tools."
+        })
+        
+        resp = await flash_client.invoke(
+            conversation,
+            tools=[],
+            on_token=on_token,
+            temperature=0.6,
+        )
+        
+        if resp.content:
+            final_response = resp.content
+            
+        if resp.usage:
+            total_usage["prompt_tokens"] += resp.usage.get("prompt_tokens", 0)
+            total_usage["completion_tokens"] += resp.usage.get("completion_tokens", 0)
+            total_usage["total_tokens"] += resp.usage.get("total_tokens", 0)
 
     output_text = final_response if has_final_answer(final_response) else final_response
     if not output_text or not output_text.strip():
