@@ -153,27 +153,6 @@ The system runs in a secure, containerized network defined in `docker-compose.ym
 
 ---
 
-## 📐 Development & Testing Suites
+## 🧹 Codebase Cleanup
 
-DeepThink includes a multi-layered verification setup to test isolated modules or full multi-agent cycles:
-
-### 1. Isolated PDF Vision Test (`orchestrator/test_pdf_direct.py`)
-Tests the PDF processor node in isolation, downloading a real arXiv paper, rendering page 1 to JPEG in-memory, and extracting technical observations using the multimodal vision pipeline.
-* **To execute:**
-  ```bash
-  docker exec deep-think-orchestrator python /app/test_pdf_direct.py
-  ```
-
-### 2. End-to-End Integration Suite (`run_elite_test_suite.py`)
-Executes sequential stress-tests against the FastAPI API endpoint to verify search scouting, GitHub scraping, code execution, parallel PDF scheduling, and constraint validation:
-* **To execute:**
-  ```bash
-  python run_elite_test_suite.py
-  ```
-
-### 3. 'think' Agent Comprehensive Verification Suite (`test_think_agent_comprehensive.py`)
-A thorough horizontal testing suite validating the registry, sandbox, web search, scraping, streaming structure, simulated typing, and token usage reporting of the fast-path agent.
-* **To execute:**
-  ```bash
-  docker exec deep-think-orchestrator python /app/test_think_agent_comprehensive.py
-  ```
+The active runtime workspace has been optimized. Temporary development test files (`test_*.py`, `test_*.json`, and `run_*_suite.py`) have been cleaned up and removed from the operational repository. This ensures a lean, production-ready codebase and reduces the build context size for the containerized environment.
