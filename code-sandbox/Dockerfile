@@ -10,13 +10,7 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir \
-    numpy \
-    sympy \
-    scipy \
-    matplotlib \
-    pandas \
-    -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 FROM dhi.io/python:3.13
 

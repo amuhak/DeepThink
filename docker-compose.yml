@@ -15,6 +15,7 @@ services:
       - code-sandbox
     networks:
       - agent_network
+      - firecrawl-network
     restart: unless-stopped
 
   searxng:
@@ -30,6 +31,7 @@ services:
       - SEARXNG_BASE_URL=http://0.0.0.0:8080/
     networks:
       - agent_network
+      - firecrawl-network
     restart: unless-stopped
 
   code-sandbox:
@@ -43,50 +45,12 @@ services:
     cpus: 1.0
     restart: unless-stopped
 
-  # Minimal Firecrawl Stack (API handles scrapes)
-  firecrawl-redis:
-    image: dhi.io/redis:8-compat
-    container_name: deep-think-firecrawl-redis
-    command: redis-server --protected-mode no
-    networks:
-      - agent_network
-    restart: unless-stopped
-
-  playwright-service:
-    image: ghcr.io/firecrawl/playwright-service:latest
-    container_name: deep-think-playwright-service
-    networks:
-      - agent_network
-    restart: unless-stopped
-
-  firecrawl-api:
-    image: ghcr.io/firecrawl/firecrawl:latest
-    container_name: deep-think-firecrawl-api
-    entrypoint: ["node", "dist/src/index.js"]
-    environment:
-      - PORT=3002
-      - HOST=0.0.0.0
-      - REDIS_URL=redis://firecrawl-redis:6379
-      - REDIS_RATE_LIMIT_URL=redis://firecrawl-redis:6379
-      - PLAYWRIGHT_MICROSERVICE_URL=http://playwright-service:3000/scrape
-      - USE_DB_AUTHENTICATION=false
-      - SELF_HOSTED=true
-      - PDF_RUST_EXTRACT_ENABLE=true
-      - MINERU_PERCENT=0
-    ports:
-      - "3002:3002"
-    depends_on:
-      - firecrawl-redis
-      - playwright-service
-    networks:
-      - agent_network
-    restart: unless-stopped
 
   openwebui:
     build: ./openwebui
     container_name: deep-think-openwebui
     ports:
-      - "3000:8080"
+      - "4653:8080"
     volumes:
       - open-webui:/app/backend/data
     environment:
@@ -105,6 +69,8 @@ services:
 networks:
   agent_network:
     driver: bridge
+  firecrawl-network:
+    external: true
 
 volumes:
   open-webui:

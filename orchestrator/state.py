@@ -6,6 +6,20 @@ FlashOutput = (
     dict  # {"worker_id": int, "prompt_type": str, "response": str, "timed_out": bool}
 )
 ExecutionLog = dict  # {"worker_id": int, "code": str, "stdout": str, "stderr": str, "exit_code": int, "timed_out": bool}
+UsageStats = dict  # {"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
+
+
+def reduce_usage(left: UsageStats | None, right: UsageStats | None) -> UsageStats:
+    if not left:
+        return right or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    if not right:
+        return left
+    return {
+        "prompt_tokens": left.get("prompt_tokens", 0) + right.get("prompt_tokens", 0),
+        "completion_tokens": left.get("completion_tokens", 0)
+        + right.get("completion_tokens", 0),
+        "total_tokens": left.get("total_tokens", 0) + right.get("total_tokens", 0),
+    }
 
 
 class DeepThinkState(TypedDict):
@@ -22,7 +36,9 @@ class DeepThinkState(TypedDict):
     # Global memory across loops - avoid repeating failed searches/URLs
     failed_urls: Annotated[list[str], operator.add]
     failed_queries: Annotated[list[str], operator.add]
+    pending_pdfs: Annotated[list[dict], operator.add]
 
     status: Literal["SOLVED", "RETRY", "PIVOT", "RUNNING"]
     loop_count: int
     final_answer: str
+    usage: Annotated[UsageStats, reduce_usage]

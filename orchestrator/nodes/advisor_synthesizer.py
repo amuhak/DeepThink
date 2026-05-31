@@ -23,10 +23,13 @@ async def advisor_synthesizer(state: DeepThinkState) -> dict:
     writer({"event": "synthesizing"})
     print("[Synthesizer] Starting...", flush=True)
 
-    # IGNORE reasoning tokens for the final synthesis to keep the UI clean
     def on_token(chunk, is_reasoning=False):
-        if not is_reasoning:
-            writer({"event": "token", "source": "Synthesizer", "text": chunk})
+        writer({
+            "event": "token",
+            "source": "Synthesizer",
+            "text": chunk,
+            "is_reasoning": is_reasoning
+        })
 
     history_str = ""
     if state.get("chat_history"):
@@ -42,7 +45,10 @@ async def advisor_synthesizer(state: DeepThinkState) -> dict:
 
     worker_results = []
     if state.get("flash_outputs"):
-        for i, out in enumerate(state["flash_outputs"]):
+        # Synthesize only using the successful final generation's worker outputs
+        current_worker_count = len(state.get("flash_prompts", []))
+        current_outputs = state["flash_outputs"][-current_worker_count:] if current_worker_count else state["flash_outputs"]
+        for i, out in enumerate(current_outputs):
             worker_id = out.get("worker_id", i)
             resp = out.get("response", "No output")
             worker_results.append(f"### Worker {worker_id} Findings:\n{resp}")
@@ -64,9 +70,6 @@ async def advisor_synthesizer(state: DeepThinkState) -> dict:
         messages,
         temperature=1.0,
         on_token=on_token,
-        top_p=0.95,
-        top_k=20,
-        presence_penalty=1.5,
     )
 
-    return {"final_answer": resp.content, "status": "SOLVED"}
+    return {"final_answer": resp.content, "status": "SOLVED", "usage": resp.usage}

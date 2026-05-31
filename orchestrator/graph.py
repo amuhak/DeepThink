@@ -5,6 +5,7 @@ from langgraph.types import Send
 from state import DeepThinkState
 from nodes.advisor_planner import advisor_planner
 from nodes.flash_worker import flash_worker
+from nodes.pdf_processor import pdf_processor
 from nodes.advisor_evaluator import advisor_evaluator
 from nodes.advisor_synthesizer import advisor_synthesizer
 
@@ -38,12 +39,14 @@ def build_graph() -> StateGraph:
 
     builder.add_node("advisor_planner", advisor_planner)
     builder.add_node("flash_worker", flash_worker)
+    builder.add_node("pdf_processor", pdf_processor)
     builder.add_node("advisor_evaluator", advisor_evaluator)
     builder.add_node("advisor_synthesizer", advisor_synthesizer)
 
     builder.add_edge(START, "advisor_planner")
     builder.add_conditional_edges("advisor_planner", route_to_workers)
-    builder.add_edge("flash_worker", "advisor_evaluator")
+    builder.add_edge("flash_worker", "pdf_processor")
+    builder.add_edge("pdf_processor", "advisor_evaluator")
     builder.add_conditional_edges("advisor_evaluator", route_after_eval)
     builder.add_edge("advisor_synthesizer", END)
 

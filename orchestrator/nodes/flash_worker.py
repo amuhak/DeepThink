@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import httpx
 
 from langgraph.config import get_stream_writer
@@ -15,50 +16,117 @@ MAX_TOOL_ITERATIONS = 10
 
 FLASH_SYSTEM = """You are a high-performance research worker. You have direct access to a Python sandbox, a Web Search engine, and a URL Scraper.
 
-TOOL RULES:
-1. PYTHON: To execute code, use:
-   ```python
-   # your code here
-   ```
-   **RESTRICTION:** Do NOT write code to scrape websites (e.g., using requests, beautifulsoup, selenium). Use the SCRAPE tool instead. Python scraping is often blocked; the SCRAPE tool uses a professional headless browser.
-
-2. SEARCH: To search the web, use:
-   ```search
-   your search query here
-   ```
-3. SCRAPE: To read the full content of a specific URL (arXiv, GitHub, documentation), use:
-    ```scrape
-    https://example.com/target-page
-    ```
-   **CRITICAL:** Use SCRAPE whenever you find a promising technical link to get full math, code, and details.
-   **PDF WARNING:** When searching for academic papers, prefer HTML versions (e.g., arXiv abstract page, Scholar, conference website) over PDF links. PDFs often lose LaTeX math formatting - even pdf-inspector cannot reconstruct proper equations from font glyphs. Look for URLs like `arxiv.org/abs/...` instead of `arxiv.org/pdf/...`.
-
-4. EXECUTION IS REAL: Do NOT simulate or "thought-block" your tools.
-5. NO LOOPING: If you have tried searching/scraping twice with no results and you have no more ideas/options, admit it and output your FINAL summary.
+TOOL RULES & INSTRUCTIONS:
+1. PYTHON (`run_code`): Execute python code inside a secure isolated sandbox container. RESTRICTION: Do NOT write code to scrape websites (e.g., requests, bs4, selenium). Use run_scrape instead.
+   **SANDBOX TOOLKIT:** The sandbox is equipped with standard high-performance Python libraries pre-installed and available:
+   - Numerical & Tensors: `numpy`, `torch` (PyTorch CPU)
+   - Machine Learning & Stats: `scipy`, `scikit-learn`
+   - Data & Graphs: `pandas`, `pyarrow`, `networkx`
+   - Symbolic & Rendering: `sympy`, `matplotlib`, `PIL` (Pillow)
+   - Parsing: `beautifulsoup4`, `lxml`
+2. SEARCH (`run_search`): Search the web using SearXNG.
+3. SCRAPE (`run_scrape`): Read the full markdown content of a specific URL (arXiv, GitHub, documentation, website). Use this to extract mathematical formulas, code snippets, and in-depth details.
+   **PDF WARNING:** When searching for academic papers, prefer HTML abstract pages (e.g. arXiv abstract page) over raw PDF links.
+4. NO LOOPING: If you have tried searching/scraping twice with no results and have no more ideas, stop calling tools and provide your FINAL summary.
 
 OUTPUT FORMAT:
-- Briefly think step-by-step.
-- Use tools as needed.
+- First, briefly think step-by-step and call appropriate tools.
 - Your final answer must start with "FINAL:" on its own line.
-- **SOURCE ATTRIBUTION:** For every key fact, you MUST state where you found it (e.g., "Source: [GitHub URL]" or "Source: [Paper Title]").
-- Always try to extract mathematical formulas and code snippets.
+- **SOURCE ATTRIBUTION:** For every key fact, you MUST state where you found it (e.g., "Source: [GitHub URL]").
+- Always extract mathematical formulas and code snippets.
 """
 
-
-def extract_code_blocks(text: str) -> list[str]:
-    # Matches ```python ... ``` with optional language tag and flexible whitespace
-    return re.findall(r"```python\s*(.*?)\s*```", text, re.DOTALL)
-
-
-def extract_search_queries(text: str) -> list[str]:
-    return re.findall(r"```search\s*(.*?)\s*```", text, re.DOTALL)
-
-
-def extract_scrape_urls(text: str) -> list[str]:
-    return re.findall(r"```scrape\s*(.*?)\s*```", text, re.DOTALL)
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_code",
+            "description": "Execute python code inside a secure isolated sandbox container. RESTRICTION: Do NOT write code to scrape websites (e.g. requests, bs4, selenium). Use run_scrape instead.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The exact python code to run in the sandbox."
+                    }
+                },
+                "required": ["code"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_search",
+            "description": "Search the web using a search engine.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The web search query."
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_scrape",
+            "description": "Read the full markdown content of a specific URL (arXiv abstract, GitHub, documentation, website). Use this when you find a promising technical link.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The absolute URL to scrape."
+                    }
+                },
+                "required": ["url"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pdf_nexttime",
+            "description": "Schedule a PDF URL to be analyzed in high-fidelity (including LaTeX math, charts, and equations) using a vision-capable LLM. Use this when you find a promising technical PDF link that has structural details/charts/formulas that scrape tools fail to extract.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The absolute URL of the PDF to analyze."
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "The specific technical question or details you want to extract from this PDF."
+                    },
+                    "pages": {
+                        "type": "string",
+                        "description": "Optional page range to analyze (e.g. '1-5' or '1,3,5'). If not specified, the first 20 pages are analyzed."
+                    }
+                },
+                "required": ["url", "question"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
+    }
+]
 
 
 def has_final_answer(text: str) -> bool:
+    if not text:
+        return False
     return bool(re.search(r"^FINAL:\s*", text, re.MULTILINE))
 
 
@@ -105,12 +173,11 @@ async def run_search(query: str, worker_id: int) -> str:
             )
         data = resp.json()
         results = data.get("results", [])
-        # Log search results for debugging
         print(
             f"[Worker {worker_id}] Search '{query}': {len(results)} results from {data.get('engines', [])}"
         )
         snippets = []
-        for r in results:  # Use ALL results, not just first 10
+        for r in results:
             title = r.get("title", "")
             snippet = r.get("content", "")
             url = r.get("url", "")
@@ -128,7 +195,7 @@ async def run_scrape(url: str, worker_id: int) -> str:
     url = url.strip()
     # Try local Firecrawl first
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 f"{FIRECRAWL_URL}/v1/scrape",
                 json={"url": url, "formats": ["markdown"]},
@@ -136,16 +203,16 @@ async def run_scrape(url: str, worker_id: int) -> str:
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get("success"):
-                    return data.get("data", {}).get("markdown", "")[:15000]
+                    return data.get("data", {}).get("markdown", "")[:50000]
     except Exception:
         pass
 
-    # Fallback to r.jina.ai (User suggestion)
+    # Fallback to r.jina.ai
     try:
         jina_url = f"https://r.jina.ai/{url}"
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(jina_url)
-        return resp.text[:10000]
+        return resp.text[:50000]
     except Exception as e:
         return f"Scrape error for {url}: {str(e)}"
 
@@ -166,25 +233,10 @@ async def flash_worker(state: DeepThinkState) -> dict:
 
     # Get config from environment
     import os
-    flash_llm_url = os.environ.get("FLASH_LLM_URL", "NOT SET")
-    flash_model = os.environ.get("FLASH_MODEL", "NOT SET")
-    debug_log.write(f"[Worker {worker_id}] FLASH_LLM_URL={flash_llm_url}\n")
-    debug_log.write(f"[Worker {worker_id}] FLASH_MODEL={flash_model}\n")
-
-    # Health check: test if FLASH_LLM_URL is reachable
-    if flash_llm_url != "NOT SET":
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                test_resp = await client.get(flash_llm_url.replace("/v1", "/models"))
-                debug_log.write(f"[Worker {worker_id}] Health check status: {test_resp.status_code}\n")
-                if test_resp.status_code == 200:
-                    debug_log.write(f"[Worker {worker_id}] Health check OK: {test_resp.text[:200]}\n")
-                else:
-                    debug_log.write(f"[Worker {worker_id}] Health check FAILED: {test_resp.status_code} - {test_resp.text[:200]}\n")
-        except Exception as e:
-            debug_log.write(f"[Worker {worker_id}] Health check ERROR: {str(e)}\n")
-    else:
-        debug_log.write(f"[Worker {worker_id}] FLASH_LLM_URL not set, skipping health check\n")
+    pro_llm_url = os.environ.get("PRO_LLM_URL", "NOT SET")
+    pro_model = os.environ.get("PRO_MODEL", "NOT SET")
+    debug_log.write(f"[Worker {worker_id}] PRO_LLM_URL={pro_llm_url}\n")
+    debug_log.write(f"[Worker {worker_id}] PRO_MODEL={pro_model}\n")
 
     writer = get_stream_writer()
     writer({"event": "flash_start", "worker": worker_id, "type": prompt_type})
@@ -211,10 +263,11 @@ async def flash_worker(state: DeepThinkState) -> dict:
     worker_timed_out = False
     local_failed_urls = []
     local_failed_queries = set()
+    local_pending_pdfs = []
     no_tool_prompt_count = 0
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     debug_log.write(f"[Worker {worker_id}] Conversation prepared. System length={len(system_with_memory)}, User length={len(prompt_text)}\n")
-    debug_log.write(f"[Worker {worker_id}] Calling flash_client.invoke()...\n")
 
     def on_token(chunk, is_reasoning=False):
         writer({"event": "token", "source": f"Worker {worker_id}", "text": chunk})
@@ -222,18 +275,19 @@ async def flash_worker(state: DeepThinkState) -> dict:
     for iteration in range(MAX_TOOL_ITERATIONS):
         resp = await flash_client.invoke(
             conversation,
+            tools=TOOLS,
             on_token=on_token,
             temperature=0.6,
-            top_p=0.95,
-            top_k=20,
-            min_p=0.0,
-            presence_penalty=0.0,
-            repetition_penalty=1.0,
         )
 
-        debug_log.write(f"[Worker {worker_id}] LLM response received: timed_out={resp.timed_out}, content_length={len(resp.content) if resp.content else 0}\n")
-        debug_log.write(f"[Worker {worker_id}] Content preview: {repr(resp.content[:200]) if resp.content else 'EMPTY'}\n")
-        debug_log.write(f"[Worker {worker_id}] Partial preview: {repr(resp.partial[:200]) if resp.partial else 'None'}\n")
+        if resp.usage:
+            total_usage["prompt_tokens"] += resp.usage.get("prompt_tokens", 0)
+            total_usage["completion_tokens"] += resp.usage.get("completion_tokens", 0)
+            total_usage["total_tokens"] += resp.usage.get("total_tokens", 0)
+
+        debug_log.write(f"[Worker {worker_id}] LLM response received: timed_out={resp.timed_out}, content_length={len(resp.content) if resp.content else 0}, tool_calls={len(resp.tool_calls)}\n")
+        debug_log.write(f"[Worker {worker_id}] LLM content: {resp.content}\n")
+        debug_log.write(f"[Worker {worker_id}] LLM tool calls: {resp.tool_calls}\n")
 
         if resp.timed_out:
             writer(
@@ -245,134 +299,148 @@ async def flash_worker(state: DeepThinkState) -> dict:
             worker_timed_out = True
             break
 
-        final_response = resp.content
-        conversation.append({"role": "assistant", "content": resp.content})
+        final_response = resp.content or ""
+        
+        # Append assistant's response to conversation in standard OpenAI tool calling flow
+        assistant_msg = {"role": "assistant"}
+        if resp.content:
+            assistant_msg["content"] = resp.content
+        if resp.tool_calls:
+            assistant_msg["tool_calls"] = resp.tool_calls
+        conversation.append(assistant_msg)
 
         if has_final_answer(resp.content):
             writer({"event": "worker_stop", "worker": worker_id, "reason": "FINAL_marker", "iteration": iteration})
             break
 
-        codes = extract_code_blocks(resp.content)
-        searches = extract_search_queries(resp.content)
-        scrapes = extract_scrape_urls(resp.content)
-
-        if not codes and not searches and not scrapes:
+        if not resp.tool_calls:
             writer({"event": "worker_stop", "worker": worker_id, "reason": "no_tools", "iteration": iteration})
             # If no final answer yet, prompt once then stop to avoid loops
             if not has_final_answer(final_response) and no_tool_prompt_count < 1:
                 conversation.append(
                     {
                         "role": "user",
-                        "content": "You haven't provided a FINAL answer. Please either output FINAL: followed by your answer, or continue working by searching/scraping/executing code.",
+                        "content": "You haven't provided a FINAL answer. Please either output FINAL: followed by your answer, or continue working by calling tools.",
                     }
                 )
                 no_tool_prompt_count += 1
                 continue
             break
 
-        tool_results = []
-
-        # Stop if we are repeating searches/scrapes
+        # Check for repetitive tool calls
         repetitive = False
-        for q in searches + scrapes:
-            if q in used_queries:
+        for tc in resp.tool_calls:
+            name = tc["function"]["name"]
+            arguments_str = tc["function"]["arguments"]
+            try:
+                args = json.loads(arguments_str)
+            except Exception:
+                args = {}
+            val = args.get("query", "") or args.get("url", "")
+            if val and val in used_queries:
                 repetitive = True
                 break
-            used_queries.add(q)
+            if val:
+                used_queries.add(val)
 
         if repetitive:
             writer({"event": "worker_stop", "worker": worker_id, "reason": "repetitive_tool", "iteration": iteration})
-            tool_results.append(
-                "ERROR: Repetitive tool call detected. You are repeating a query that already failed or yielded no new info. Please STOP and provide your FINAL summary based on what you already found."
-            )
+            for tc in resp.tool_calls:
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "name": tc["function"]["name"],
+                    "content": "ERROR: Repetitive tool call detected. You are repeating a query or URL that already failed or yielded no new info. Please STOP and provide your FINAL summary based on what you already found."
+                })
+            continue
 
-        if not repetitive:
-            for code in codes:
-                writer(
-                    {
-                        "event": "code_executing",
-                        "worker": worker_id,
-                        "iteration": iteration,
-                    }
-                )
+        # Execute each tool call
+        for tc in resp.tool_calls:
+            name = tc["function"]["name"]
+            arguments_str = tc["function"]["arguments"]
+            call_id = tc["id"]
+
+            try:
+                args = json.loads(arguments_str)
+            except Exception as e:
+                args = {}
+
+            result_str = ""
+            if name == "run_code":
+                code = args.get("code", "")
+                writer({"event": "code_executing", "worker": worker_id, "iteration": iteration})
                 log = await run_code(code, worker_id)
                 execution_logs.append(log)
-                status = (
-                    "SUCCESS"
-                    if log["exit_code"] == 0
-                    else f"FAILED (exit {log['exit_code']})"
-                )
-                tool_results.append(
-                    f"Code execution {status}:\nstdout:\n{log['stdout']}\nstderr:\n{log['stderr']}"
-                )
+                status = "SUCCESS" if log["exit_code"] == 0 else f"FAILED (exit {log['exit_code']})"
+                result_str = f"Code execution {status}:\nstdout:\n{log['stdout']}\nstderr:\n{log['stderr']}"
 
-            for query in searches:
+            elif name == "run_search":
+                query = args.get("query", "")
                 writer({"event": "searching", "worker": worker_id, "query": query})
                 search_result = await run_search(query, worker_id)
-                execution_logs.append(
-                    {
-                        "worker_id": worker_id,
-                        "code": f"SEARCH: {query}",
-                        "stdout": search_result[:10000],
-                        "stderr": "",
-                        "exit_code": 0,
-                        "timed_out": False,
-                    }
-                )
-                # Only add to failed queries if search returned no results (not transient errors)
+                execution_logs.append({
+                    "worker_id": worker_id,
+                    "code": f"SEARCH: {query}",
+                    "stdout": search_result[:10000],
+                    "stderr": "",
+                    "exit_code": 0,
+                    "timed_out": False,
+                })
                 if search_result == "No results found.":
                     local_failed_queries.add(query)
-                tool_results.append(
-                    f"Search results for '{query}':\n{search_result[:5000]}"
-                )
+                result_str = f"Search results for '{query}':\n{search_result[:5000]}"
 
-            for url in scrapes:
+            elif name == "run_scrape":
+                url = args.get("url", "")
                 writer({"event": "scraping", "worker": worker_id, "url": url})
                 scrape_result = await run_scrape(url, worker_id)
-
-                # Track failed URLs (paywalls, errors, empty results)
+                
                 failure_indicators = ["error", "blocked", "paywall", "403", "forbidden", "requires authentication", "access denied", "too short"]
                 is_failure = any(indicator in scrape_result.lower() for indicator in failure_indicators) or len(scrape_result) < 100
                 if is_failure:
                     local_failed_urls.append(url)
 
-                execution_logs.append(
-                    {
-                        "worker_id": worker_id,
-                        "code": f"SCRAPE: {url}",
-                        "stdout": scrape_result[:2000],
-                        "stderr": "",
-                        "exit_code": 0,
-                        "timed_out": False,
-                    }
-                )
-                tool_results.append(f"Scraped content from {url}:\n{scrape_result}")
+                execution_logs.append({
+                    "worker_id": worker_id,
+                    "code": f"SCRAPE: {url}",
+                    "stdout": scrape_result[:2000],
+                    "stderr": "",
+                    "exit_code": 0,
+                    "timed_out": False,
+                })
+                result_str = f"Scraped content from {url}:\n{scrape_result}"
+            elif name == "get_pdf_nexttime":
+                url = args.get("url", "")
+                question = args.get("question", "")
+                pages = args.get("pages", "")
+                writer({"event": "token", "source": f"Worker {worker_id}", "text": f"\n- [Worker {worker_id}] Scheduled PDF link for vision analysis: {url}...\n"})
+                local_pending_pdfs.append({
+                    "url": url,
+                    "question": question,
+                    "pages": pages,
+                    "worker_id": worker_id
+                })
+                result_str = f"Successfully scheduled PDF ({url}) for high-fidelity vision processing. It will be rendered and analyzed by the multimodal Pro LLM immediately after this research turn completes."
+            else:
+                result_str = f"ERROR: Unknown tool '{name}'."
 
-        if tool_results:
-            conversation.append(
-                {
-                    "role": "user",
-                    "content": "Tool results:\n"
-                    + "\n---\n".join(tool_results)
-                    + "\n\nContinue your reasoning or output your FINAL answer.",
-                }
-            )
-        else:
-            break
+            conversation.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": name,
+                "content": result_str
+            })
 
     output_text = final_response if has_final_answer(final_response) else final_response
-    # Fallback: if output is empty or just whitespace, add error context
     if not output_text or not output_text.strip():
         output_text = "[WORKER produced no output - likely API failure or timeout]"
 
-    # Log if we hit max iterations without explicit stop
     if not has_final_answer(final_response) and not worker_timed_out:
         writer({"event": "worker_stop", "worker": worker_id, "reason": "max_iterations", "iteration": MAX_TOOL_ITERATIONS - 1})
 
     writer({"event": "flash_done", "worker": worker_id, "type": prompt_type})
 
     debug_log.write(f"[Worker {worker_id}] END - output_length={len(output_text)}, timed_out={worker_timed_out}\n")
-    debug_log.write(f"[Worker {worker_id}] Output preview: {repr(output_text[:200])}\n")
     debug_log.close()
 
     return {
@@ -387,4 +455,6 @@ async def flash_worker(state: DeepThinkState) -> dict:
         "execution_logs": execution_logs,
         "failed_urls": local_failed_urls,
         "failed_queries": list(local_failed_queries),
+        "usage": total_usage,
+        "pending_pdfs": local_pending_pdfs,
     }

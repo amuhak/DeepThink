@@ -114,7 +114,9 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
 
     if state.get("flash_outputs"):
         eval_parts.append("## Worker Outputs")
-        for i, out in enumerate(state["flash_outputs"]):
+        current_worker_count = len(state.get("flash_prompts", []))
+        current_outputs = state["flash_outputs"][-current_worker_count:] if current_worker_count else state["flash_outputs"]
+        for i, out in enumerate(current_outputs):
             resp = out.get("response", "No output")
             import re
 
@@ -159,11 +161,6 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
         messages,
         temperature=0.6,
         on_token=on_token,
-        top_p=0.95,
-        top_k=20,
-        min_p=0.0,
-        presence_penalty=0.0,
-        repetition_penalty=1.0,
     )
 
     loop_count = state.get("loop_count", 0) + 1
@@ -193,6 +190,7 @@ async def advisor_evaluator(state: DeepThinkState) -> dict:
         "status": status,
         "evaluation_history": [critique],
         "loop_count": loop_count,
+        "usage": resp.usage,
     }
 
     return result

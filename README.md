@@ -18,7 +18,7 @@ User → OpenAI API → Orchestrator (LangGraph)
 | Node | LLM | Purpose |
 |------|-----|---------|
 | `advisor_planner` | PRO | Strategic planner. Generates N balanced prompts (prove/refute) and instructs workers on tool use. |
-| `flash_worker` | FLASH | High-speed researcher. Parallel execution via `Send()`. Uses `search`, `scrape` (Firecrawl + Jina), and `python`. Each worker runs up to 5 tool iterations internally. Features global memory to avoid repeating failed URLs/queries. |
+| `flash_worker` | FLASH | High-speed researcher. Parallel execution via `Send()`. Uses `search`, `scrape` (Firecrawl + Jina), and `python`. Each worker runs up to 10 tool iterations internally. Features loop-specific memory to avoid repeating failed URLs/queries, with automatic expiry of old failures to allow retries. Prevents no-tool infinite loops by limiting "add FINAL" prompts to 1 retry. |
 | `advisor_evaluator` | PRO | Senior Technical Lead. Critiques worker output, detects loops, and decides SOLVED/RETRY/PIVOT. Includes LaTeX-aware JSON parsing. |
 | `advisor_synthesizer`| PRO | Final Report Writer. Polishes raw research into an elite, LaTeX-heavy technical report. |
 
@@ -38,9 +38,9 @@ START → advisor_planner → [Send() × N] → flash_worker (parallel)
 
 Workers can stop due to:
 - `FINAL_marker`: Worker output contains `FINAL:` prefix
-- `no_tools`: No code/search/scrape blocks detected in response (now prompts worker to continue instead of silent break)
-- `repetitive_tool`: Same query already tried
-- `max_iterations`: Hit 5 tool iteration limit
+- `no_tools`: No code/search/scrape blocks detected in response (prompts worker once to add FINAL/continue, then stops to prevent loops)
+- `repetitive_tool`: Same query already tried (limited to last 50 failed queries to allow retry of transient failures)
+- `max_iterations`: Hit 10 tool iteration limit
 - `timeout`: FLASH model timed out
 
 ## Quick Start
@@ -137,17 +137,20 @@ OpenAI-compatible endpoint. Supports real-time thought streaming.
 | `searxng` | 8080 | Local web search engine |
 | `firecrawl-api`| 3002 | Headless browser API for deep scraping |
 | `code-sandbox` | internal | Isolated Python execution (numpy, sympy, scipy, pandas) |
-| `openwebui` | 3000 | (Optional) Modern UI for interacting with DeepThink. Connects to orchestrator, FastChat, PRO, and FLASH endpoints. |
+| `openwebui` | 4653 | (Optional) Modern UI for interacting with DeepThink. Connects to orchestrator, FastChat, PRO, and FLASH endpoints. |
 
 ## Design Decisions
 
 - **Silent Thinking Filter**: PRO/FLASH models may output `reasoning_content` with internal thinking. This is merged into the main content stream for display.
 - **Firecrawl + Jina Fallback**: Workers use local Firecrawl for scraping, falling back to `r.jina.ai` if it fails. Both now use PDF Rust extraction (`PDF_RUST_EXTRACT_ENABLE=true`), but workers are instructed to prefer HTML sources (arXiv abs/ vs pdf/) for better LaTeX preservation.
+- **Decoupled Synthesis**: The system separates research evaluation from report generation. The Evaluator handles routing and technical critique via a lightweight JSON schema, while the Synthesizer builds the final high-fidelity report from raw worker findings. This eliminates JSON parsing failures caused by complex LaTeX/code blocks.
+- **Token Usage Tracking**: The system tracks token consumption across all phases (planning, parallel research, and synthesis). Usage is aggregated using a custom LangGraph reducer and can be replayed in the final SSE chunk or blocking response via `stream_options: {"include_usage": true}`.
 - **Exhaustive Reporting**: The system produces high-fidelity technical reports with LaTeX and code snippets, rather than simple summaries.
-- **Safety**: Each worker is restricted to 5 tool iterations and is automatically terminated if it detects a query loop.
-- **JSON Resilience**: Planner and evaluator use custom parsers that handle markdown code fences, truncated JSON, invalid escape characters, and LaTeX expressions (e.g., `\frac`, `\sum`, `\alpha`).
+- **Safety**: Each worker is restricted to 10 tool iterations and is automatically terminated if it detects a query loop. No-tool loops are prevented by limiting "add FINAL" prompts to 1 retry per worker.
+- **JSON Resilience**: Planner and evaluator use custom parsers that handle markdown code fences, truncated JSON, invalid escape characters, and LaTeX expressions. LaTeX double-escaping is prevented using negative lookbehind regex to only escape unescaped backslashes.
 - **Three-Retry Timeout**: LLM calls retry up to 3 times on 524/504 gateway errors before marking as failed.
-- **Global Memory**: Workers track failed URLs and search queries across loops. The state includes `failed_urls` and `failed_queries` (using `operator.add` reducer), which are passed to subsequent workers via system prompt to avoid repeating failed attempts.
+- **Global Memory**: Workers track failed URLs and search queries across loops. The state includes `failed_urls` and `failed_queries` (using `operator.add` reducer), which are passed to subsequent workers via system prompt to avoid repeating failed attempts. Only the last 50 failed queries are blocked to allow retry of transient failures, and only queries with genuine "no results" responses are added to the failed list (not transient errors).
+- **Evaluator Truncation**: Worker outputs sent to the evaluator preserve both early evidence (first 1000 chars with URLs/sources) and the FINAL section (last 1000 chars) instead of only the tail, preventing premature PIVOT/RETRY decisions due to lost evidence.
 - **Paywall Blacklist**: Academic search queries automatically exclude major paywall sites (`-site:sciencedirect.com -site:elsevier.com -site:springer.com -site:nature.com -site:ieee.com -site:acm.org`) to improve content accessibility.
 - **Improved Error Handling**: LLM client now returns `[WORKER ERROR: ...]` or `[TIMEOUT]` in content instead of empty strings, allowing the evaluator to detect and report API failures properly.
 - **Worker Output Fallback**: If a worker produces no output (empty string), the system now adds `[WORKER produced no output - likely API failure or timeout]` to surface the issue.
@@ -155,6 +158,5 @@ OpenAI-compatible endpoint. Supports real-time thought streaming.
 ## Known Limitations
 
 - **PDF Extraction**: Firecrawl and Jina.ai convert PDFs to plain text but lose LaTeX formatting. Workers should prefer HTML versions of papers (arXiv, Scholar, etc.) over PDFs.
-- **FLASH Speed**: The FLASH endpoint may be slower than PRO. Worker tool calls and search results are truncated to manage payload size.
+- **FLASH Speed**: The FLASH endpoint may be slower than PRO. Worker tool calls and search results are strategically truncated (preserving evidence + FINAL sections) to manage payload size while maintaining evaluation accuracy.
 - **Worker Debugging**: If workers return empty outputs, check `/tmp/worker_N_debug.log` inside the container and enable `DEBUG_LLM=1` in `.env`.
-- **LaTeX in JSON**: Despite improved parsing, complex LaTeX expressions in evaluator JSON output may still cause parse failures. The system will retry with evaluator hints.

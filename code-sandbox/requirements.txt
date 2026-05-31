@@ -1,2 +1,16 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi==0.115.*
 uvicorn==0.34.*
+numpy
+sympy
+scipy
+matplotlib
+pandas
+scikit-learn
+torch
+networkx
+pillow
+beautifulsoup4
+lxml
+pyarrow
+

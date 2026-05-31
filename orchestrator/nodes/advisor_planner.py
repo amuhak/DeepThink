@@ -22,9 +22,10 @@ PHASE 2: BALANCED DEEP-DIVE
 - REFUTE: Half should look for edge cases, limitations, competing technologies, or verify if the subject is a misnomer/hallucination.
 
 TOOL USAGE INSTRUCTIONS:
-- Instruct workers to use ```search\\nquery\\n```, ```scrape\\nurl\\n```, or ```python\\ncode\\n``` blocks.
-- **SCRAPE IS MANDATORY:** Remind workers that ```scrape``` is the only way to get full text, math, and code from a URL.
+- Instruct workers to use ```search\\nquery\\n```, ```scrape\\nurl\\n```, ```python\\ncode\\n```, or `get_pdf_nexttime` tools.
+- **SCRAPE IS MANDATORY:** Remind workers that ```scrape``` is the only way to get full text, math, and code from standard URLs.
 - **NO PYTHON SCRAPING:** Explicitly forbid writing requests/BS4 code; use the ```scrape``` tool.
+- **PDF HIGH-FIDELITY VISION ANALYSIS (`get_pdf_nexttime`):** If the research task or context involves a PDF with dense math formulas, equations, charts, or diagrams (such as arXiv papers), explicitly direct the workers to use the `get_pdf_nexttime` tool to schedule a high-fidelity visual analysis of the relevant pages.
 
 Output must be valid JSON:
 {
@@ -89,7 +90,7 @@ async def advisor_planner(state: DeepThinkState) -> dict:
     with open("/tmp/planner.log", "a") as f:
         f.write("[Planner] Starting...\n")
 
-    n_explorers = int(os.environ.get("NUM_FLASH_EXPLORERS", "4"))
+    n_explorers = min(int(os.environ.get("NUM_FLASH_EXPLORERS", "4")), 4)
     n_prove = n_explorers // 2
     n_refute = n_explorers - n_prove
 
@@ -119,11 +120,11 @@ async def advisor_planner(state: DeepThinkState) -> dict:
             )
 
     if state.get("evaluation_history"):
-        critique = "\n---\n".join(state["evaluation_history"])
+        last_critique = state["evaluation_history"][-1]
         messages.append(
             {
                 "role": "user",
-                "content": f"Previous attempt failed. Here is the evaluation history:\n{critique}\n\nPlease devise a NEW strategy and generate fresh prompts.",
+                "content": f"Previous attempt failed. Here is the evaluation critique from the last attempt:\n{last_critique}\n\nPlease devise a NEW strategy and generate fresh prompts.",
             }
         )
 
@@ -140,11 +141,6 @@ async def advisor_planner(state: DeepThinkState) -> dict:
         messages,
         temperature=1.0,
         on_token=on_token,
-        top_p=0.95,
-        top_k=20,
-        min_p=0.0,
-        presence_penalty=1.5,
-        repetition_penalty=1.0,
     )
 
     # TEMP: Skip LLM call for testing
@@ -214,4 +210,5 @@ async def advisor_planner(state: DeepThinkState) -> dict:
         "current_plan": plan,
         "flash_prompts": prompts,
         "status": "RUNNING",
+        "usage": resp.usage,
     }
