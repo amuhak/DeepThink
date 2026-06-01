@@ -1,9 +1,52 @@
 import time
 import json
 import uuid
+import asyncio
+from collections import OrderedDict
 
 from fastapi import HTTPException
 from pydantic import BaseModel
+
+
+class DeepThinkQueue:
+    def __init__(self):
+        self._queue = OrderedDict()  # request_id -> asyncio.Event
+        self._current_running = None
+        self._lock = asyncio.Lock()
+
+    def register(self, request_id: str) -> asyncio.Event:
+        event = asyncio.Event()
+        self._queue[request_id] = event
+        # If queue is empty and nothing is running, trigger immediately
+        if len(self._queue) == 1 and not self._current_running:
+            event.set()
+        return event
+
+    def get_position(self, request_id: str) -> int:
+        if request_id not in self._queue:
+            return 0
+        keys = list(self._queue.keys())
+        return keys.index(request_id) + 1
+
+    async def acquire(self, request_id: str):
+        event = self._queue.get(request_id)
+        if not event:
+            return
+        await event.wait()
+        async with self._lock:
+            self._current_running = request_id
+
+    def release(self, request_id: str):
+        if request_id in self._queue:
+            del self._queue[request_id]
+        if self._current_running == request_id:
+            self._current_running = None
+        # Wake up the next waiting request in FIFO order
+        if self._queue:
+            next_id = next(iter(self._queue))
+            self._queue[next_id].set()
+
+deepthink_queue = DeepThinkQueue()
 
 
 class ChatMessage(BaseModel):
@@ -60,6 +103,7 @@ async def run_streaming(
 ):
     user_prompt = extract_user_prompt(messages)
     chunk_id = str(uuid.uuid4())
+    request_id = str(uuid.uuid4())
     yield build_sse_chunk(chunk_id, "<thinking>\n")
     thinking_open = True
     last_source = None
@@ -69,110 +113,129 @@ async def run_streaming(
     if config_overrides:
         config.update(config_overrides)
 
+    event = deepthink_queue.register(request_id)
+
     try:
-        async for part in graph.astream(
-            {
-                "user_prompt": user_prompt,
-                "chat_history": [
-                    {"role": m.role, "content": m.content} for m in messages
-                ],
-                "status": "RUNNING",
-                "loop_count": 0,
-                "flash_outputs": [],
-                "execution_logs": [],
-                "evaluation_history": [],
-                "flash_prompts": [],
-                "current_plan": "",
-                "final_answer": "",
-                "pending_pdfs": [],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-            },
-            stream_mode=["updates", "custom"],
-            version="v2",
-            config=config,
-        ):
-            ptype = part.get("type", "")
+        last_pos = -1
+        while True:
+            if event.is_set():
+                break
+            pos = deepthink_queue.get_position(request_id)
+            if pos != last_pos:
+                yield build_sse_chunk(chunk_id, f"\n- [Queue] Position {pos} in queue. Waiting for prior deepthink tasks to complete...\n")
+                last_pos = pos
+            yield ": keep-alive\n\n"
+            await asyncio.sleep(2.0)
 
-            if ptype == "custom":
-                data = part.get("data", {})
-                event = data.get("event", "")
+        await deepthink_queue.acquire(request_id)
+        yield build_sse_chunk(chunk_id, f"\n- [Queue] Active! Starting DeepThink research loop...\n")
 
-                if event == "token":
-                    source = data.get("source", "?")
-                    text = data.get("text", "")
-                    is_reasoning = data.get("is_reasoning", False)
+        try:
+            async for part in graph.astream(
+                {
+                    "user_prompt": user_prompt,
+                    "chat_history": [
+                        {"role": m.role, "content": m.content} for m in messages
+                    ],
+                    "status": "RUNNING",
+                    "loop_count": 0,
+                    "flash_outputs": [],
+                    "execution_logs": [],
+                    "evaluation_history": [],
+                    "flash_prompts": [],
+                    "current_plan": "",
+                    "final_answer": "",
+                    "pending_pdfs": [],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                },
+                stream_mode=["updates", "custom"],
+                version="v2",
+                config=config,
+            ):
+                ptype = part.get("type", "")
 
-                    if source == "Synthesizer":
-                        if is_reasoning:
-                            if thinking_open:
-                                if last_source != source:
-                                    yield build_sse_chunk(chunk_id, f"\n\n[{source} Thinking] ")
-                                    last_source = source
+                if ptype == "custom":
+                    data = part.get("data", {})
+                    event_type = data.get("event", "")
+
+                    if event_type == "token":
+                        source = data.get("source", "?")
+                        text = data.get("text", "")
+                        is_reasoning = data.get("is_reasoning", False)
+
+                        if source == "Synthesizer":
+                            if is_reasoning:
+                                if thinking_open:
+                                    if last_source != source:
+                                        yield build_sse_chunk(chunk_id, f"\n\n[{source} Thinking] ")
+                                        last_source = source
+                                    yield build_sse_chunk(chunk_id, text)
+                            else:
+                                if thinking_open:
+                                    yield build_sse_chunk(chunk_id, "\n</thinking>\n\n")
+                                    thinking_open = False
                                 yield build_sse_chunk(chunk_id, text)
-                        else:
-                            if thinking_open:
-                                yield build_sse_chunk(chunk_id, "\n</thinking>\n\n")
-                                thinking_open = False
+                        elif not thinking_open:
                             yield build_sse_chunk(chunk_id, text)
-                    elif not thinking_open:
-                        yield build_sse_chunk(chunk_id, text)
-                    elif source in ["Planner", "Evaluator", "PDF Processor"]:
-                        if last_source != source:
-                            yield build_sse_chunk(chunk_id, f"\n\n[{source} Thinking] ")
-                            last_source = source
-                        yield build_sse_chunk(chunk_id, text)
-                    else:
-                        # Send keep-alive SSE comments for worker tokens to prevent connection timeouts
-                        yield ": keep-alive\n\n"
-                elif event == "planning":
-                    pass
-                elif event == "flash_start":
-                    pass
-                elif event == "code_executing":
-                    wid = data.get("worker", 0)
-                    yield build_sse_chunk(
-                        chunk_id, f"\n- [Worker {wid}] Executing code...\n"
-                    )
-                elif event == "searching":
-                    wid = data.get("worker", 0)
-                    query = data.get("query", "")
-                    yield build_sse_chunk(
-                        chunk_id, f"\n- [Worker {wid}] Searching: {query}\n"
-                    )
-                elif event == "scraping":
-                    wid = data.get("worker", 0)
-                    url = data.get("url", "")
-                    yield build_sse_chunk(
-                        chunk_id, f"\n- [Worker {wid}] Scraping: {url}\n"
-                    )
-                elif event == "flash_done":
-                    pass
-                elif event == "evaluating":
-                    pass
-                elif event == "decision":
-                    status = data.get("status", "?")
-                    loop = data.get("loop", 0)
-                    if status != "SOLVED":
+                        elif source in ["Planner", "Evaluator", "PDF Processor"]:
+                            if last_source != source:
+                                yield build_sse_chunk(chunk_id, f"\n\n[{source} Thinking] ")
+                                last_source = source
+                            yield build_sse_chunk(chunk_id, text)
+                        else:
+                            # Send keep-alive SSE comments for worker tokens to prevent connection timeouts
+                            yield ": keep-alive\n\n"
+                    elif event_type == "planning":
+                        pass
+                    elif event_type == "flash_start":
+                        pass
+                    elif event_type == "code_executing":
+                        wid = data.get("worker", 0)
                         yield build_sse_chunk(
-                            chunk_id, f"\n- [Loop {loop} Ended] Status: {status} (Next step: {data.get('reason', '')[:60]}...)\n"
+                            chunk_id, f"\n- [Worker {wid}] Executing code...\n"
                         )
-                elif event == "synthesizing":
-                    pass
+                    elif event_type == "searching":
+                        wid = data.get("worker", 0)
+                        query = data.get("query", "")
+                        yield build_sse_chunk(
+                            chunk_id, f"\n- [Worker {wid}] Searching: {query}\n"
+                        )
+                    elif event_type == "scraping":
+                        wid = data.get("worker", 0)
+                        url = data.get("url", "")
+                        yield build_sse_chunk(
+                            chunk_id, f"\n- [Worker {wid}] Scraping: {url}\n"
+                        )
+                    elif event_type == "flash_done":
+                        pass
+                    elif event_type == "evaluating":
+                        pass
+                    elif event_type == "decision":
+                        status = data.get("status", "?")
+                        loop = data.get("loop", 0)
+                        if status != "SOLVED":
+                            yield build_sse_chunk(
+                                chunk_id, f"\n- [Loop {loop} Ended] Status: {status} (Next step: {data.get('reason', '')[:60]}...)\n"
+                            )
+                    elif event_type == "synthesizing":
+                        pass
 
-            elif ptype == "updates":
-                for node_name, node_update in part.get("data", {}).items():
-                    if node_update and isinstance(node_update, dict) and "usage" in node_update and node_update["usage"]:
-                        u = node_update["usage"]
-                        total_usage["prompt_tokens"] += u.get("prompt_tokens", 0)
-                        total_usage["completion_tokens"] += u.get("completion_tokens", 0)
-                        total_usage["total_tokens"] += u.get("total_tokens", 0)
+                elif ptype == "updates":
+                    for node_name, node_update in part.get("data", {}).items():
+                        if node_update and isinstance(node_update, dict) and "usage" in node_update and node_update["usage"]:
+                            u = node_update["usage"]
+                            total_usage["prompt_tokens"] += u.get("prompt_tokens", 0)
+                            total_usage["completion_tokens"] += u.get("completion_tokens", 0)
+                            total_usage["total_tokens"] += u.get("total_tokens", 0)
 
-    except Exception as e:
-        if thinking_open:
-            yield build_sse_chunk(chunk_id, f"\n[Error: {str(e)}]\n\n</thinking>\n\n")
-            thinking_open = False
-        else:
-            yield build_sse_chunk(chunk_id, f"\n[Error: {str(e)}]\n")
+        except Exception as e:
+            if thinking_open:
+                yield build_sse_chunk(chunk_id, f"\n[Error: {str(e)}]\n\n</thinking>\n\n")
+                thinking_open = False
+            else:
+                yield build_sse_chunk(chunk_id, f"\n[Error: {str(e)}]\n")
+    finally:
+        deepthink_queue.release(request_id)
 
     if thinking_open:
         yield build_sse_chunk(chunk_id, "\n</thinking>\n\n")
@@ -189,23 +252,30 @@ async def run_blocking(
     if config_overrides:
         config.update(config_overrides)
 
-    result = await graph.ainvoke(
-        {
-            "user_prompt": user_prompt,
-            "chat_history": [{"role": m.role, "content": m.content} for m in messages],
-            "status": "RUNNING",
-            "loop_count": 0,
-            "flash_outputs": [],
-            "execution_logs": [],
-            "evaluation_history": [],
-            "flash_prompts": [],
-            "current_plan": "",
-            "final_answer": "",
-            "pending_pdfs": [],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        },
-        config=config,
-    )
+    request_id = str(uuid.uuid4())
+    event = deepthink_queue.register(request_id)
+    try:
+        await event.wait()
+        await deepthink_queue.acquire(request_id)
+        result = await graph.ainvoke(
+            {
+                "user_prompt": user_prompt,
+                "chat_history": [{"role": m.role, "content": m.content} for m in messages],
+                "status": "RUNNING",
+                "loop_count": 0,
+                "flash_outputs": [],
+                "execution_logs": [],
+                "evaluation_history": [],
+                "flash_prompts": [],
+                "current_plan": "",
+                "final_answer": "",
+                "pending_pdfs": [],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+            config=config,
+        )
+    finally:
+        deepthink_queue.release(request_id)
 
     final_answer = result.get("final_answer", "")
     if not final_answer and result.get("status") == "SOLVED":
@@ -261,13 +331,20 @@ async def run_flash_agent_stream(
             
         event = data.get("event", "")
         if event == "state_change":
-            state = data.get("state", "")
-            if state == "synthesizing" and thinking_open:
-                yield build_sse_chunk(chunk_id, "\n</thinking>\n\n")
-                thinking_open = False
+            pass  # Handled dynamically by token's is_reasoning flag
         elif event == "token":
             text = data.get("text", "")
-            yield build_sse_chunk(chunk_id, text)
+            is_reasoning = data.get("is_reasoning", False)
+            if is_reasoning:
+                if not thinking_open:
+                    yield build_sse_chunk(chunk_id, "\n<thinking>\n")
+                    thinking_open = True
+                yield build_sse_chunk(chunk_id, text)
+            else:
+                if thinking_open:
+                    yield build_sse_chunk(chunk_id, "\n</thinking>\n\n")
+                    thinking_open = False
+                yield build_sse_chunk(chunk_id, text)
         elif event == "usage":
             u = data.get("usage", {})
             total_usage["prompt_tokens"] += u.get("prompt_tokens", 0)

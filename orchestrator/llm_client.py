@@ -12,30 +12,46 @@ class ToolCallStreamFilter:
         self.state = "NORMAL"  # "NORMAL", "CHECKING_START", "BUFFERING_BLOCK", "CHECKING_END"
         self.buffer = ""
         self.block_buffer = ""
+        self.in_think_block = False
 
     def process(self, text: str, is_reasoning: bool):
         if not self.on_token:
             return
 
         for char in text:
+            effective_reasoning = is_reasoning or self.in_think_block
+            
             if self.state == "NORMAL":
                 if char == "<":
                     self.state = "CHECKING_START"
                     self.buffer = "<"
                 else:
-                    self.on_token(char, is_reasoning)
+                    self.on_token(char, effective_reasoning)
 
             elif self.state == "CHECKING_START":
                 self.buffer += char
-                target = "<tool_call>"
-                if target.startswith(self.buffer):
-                    if self.buffer == target:
+                target_tool = "<tool_call>"
+                target_think = "<think>"
+                target_end_think = "</think>"
+                
+                if target_tool.startswith(self.buffer):
+                    if self.buffer == target_tool:
                         self.state = "BUFFERING_BLOCK"
                         self.block_buffer = "<tool_call>"
                         self.buffer = ""
-                else:
+                elif target_think.startswith(self.buffer):
+                    if self.buffer == target_think:
+                        self.in_think_block = True
+                        self.state = "NORMAL"
+                        self.buffer = ""
+                elif target_end_think.startswith(self.buffer):
+                    if self.buffer == target_end_think:
+                        self.in_think_block = False
+                        self.state = "NORMAL"
+                        self.buffer = ""
+                elif not (target_tool.startswith(self.buffer) or target_think.startswith(self.buffer) or target_end_think.startswith(self.buffer)):
                     for c in self.buffer:
-                        self.on_token(c, is_reasoning)
+                        self.on_token(c, effective_reasoning)
                     self.state = "NORMAL"
                     self.buffer = ""
 
@@ -46,12 +62,13 @@ class ToolCallStreamFilter:
                     self.buffer = "<"
 
             elif self.state == "CHECKING_END":
+                self.block_buffer += char
                 self.buffer += char
                 target = "</tool_call>"
                 if target.startswith(self.buffer):
                     if self.buffer == target:
-                        full_block = self.block_buffer + self.buffer
-                        inner_content = self.block_buffer[11:].strip()
+                        full_block = self.block_buffer
+                        inner_content = self.block_buffer[11:-12].strip()
                         is_tool_call = False
                         try:
                             parsed = json.loads(inner_content)
@@ -60,26 +77,33 @@ class ToolCallStreamFilter:
                         except Exception:
                             pass
                         
+                        if not is_tool_call and ("<<function=" in inner_content or '{"name":' in inner_content.replace(" ", "")):
+                            is_tool_call = True
+                            
                         if not is_tool_call:
                             # Flush the entire block because it is literal explanation/text
                             for c in full_block:
-                                self.on_token(c, is_reasoning)
+                                self.on_token(c, effective_reasoning)
                         
                         self.buffer = ""
                         self.block_buffer = ""
                         self.state = "NORMAL"
                 else:
-                    self.block_buffer += self.buffer
-                    self.buffer = ""
-                    self.state = "BUFFERING_BLOCK"
+                    if char == "<":
+                        self.buffer = "<"
+                        self.state = "CHECKING_END"
+                    else:
+                        self.buffer = ""
+                        self.state = "BUFFERING_BLOCK"
 
     def flush(self, is_reasoning: bool = False):
+        effective_reasoning = is_reasoning or getattr(self, "in_think_block", False)
         if self.state == "CHECKING_START" and self.buffer:
             for c in self.buffer:
-                self.on_token(c, is_reasoning)
+                self.on_token(c, effective_reasoning)
         elif self.state in ["BUFFERING_BLOCK", "CHECKING_END"]:
             for c in self.block_buffer + self.buffer:
-                self.on_token(c, is_reasoning)
+                self.on_token(c, effective_reasoning)
         self.buffer = ""
         self.block_buffer = ""
         self.state = "NORMAL"
@@ -244,6 +268,40 @@ class LLMClient:
                 if stream_filter:
                     stream_filter.flush(is_reasoning=False)
 
+                import re
+                custom_tc_pattern = r"<tool_call>(.*?)</tool_call>"
+                for match in re.finditer(custom_tc_pattern, content, flags=re.DOTALL):
+                    inner_text = match.group(1).strip()
+                    try:
+                        parsed = json.loads(inner_text)
+                        if isinstance(parsed, dict) and "name" in parsed:
+                            tool_calls.append({
+                                "id": "call_" + str(len(tool_calls)),
+                                "type": "function",
+                                "function": {
+                                    "name": parsed["name"],
+                                    "arguments": json.dumps(parsed.get("arguments", {}))
+                                }
+                            })
+                    except Exception:
+                        if "<<function=" in inner_text or '{"name":' in inner_text.replace(" ", ""):
+                            name_match = re.search(r"<<function=([^>]+)>", inner_text)
+                            if name_match:
+                                func_name = name_match.group(1)
+                                args = {}
+                                param_pattern = r"<<parameter=([^>]+)>\n(.*?)\n<</parameter>"
+                                for p_match in re.finditer(param_pattern, inner_text, flags=re.DOTALL):
+                                    args[p_match.group(1)] = p_match.group(2).strip()
+                                
+                                tool_calls.append({
+                                    "id": "call_" + str(len(tool_calls)),
+                                    "type": "function",
+                                    "function": {
+                                        "name": func_name,
+                                        "arguments": json.dumps(args)
+                                    }
+                                })
+                                
                 if len(content.strip()) < 10 and reasoning.strip():
                     content = reasoning
 
@@ -274,7 +332,8 @@ class LLMClient:
                                     if parsed_args == actual_args:
                                         return ""
                         except Exception:
-                            pass
+                            if "<<function=" in inner_text or '{"name":' in inner_text.replace(" ", ""):
+                                return ""
                         return match.group(0)
                     return re.sub(pattern, replace_fn, text, flags=re.DOTALL)
 

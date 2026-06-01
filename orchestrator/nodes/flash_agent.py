@@ -1,8 +1,92 @@
 import json
+import re
 import asyncio
 from state import DeepThinkState
 from llm_client import flash_client
 from nodes.flash_worker import TOOLS, run_code, run_search, run_scrape
+
+
+def _extract_answer_from_content(raw_content: str) -> tuple[str, str]:
+    """
+    Parse raw LLM content to separate reasoning from the actual answer.
+    
+    Qwen3 models emit <think>...</think> blocks, but sometimes continue
+    reasoning in plain text after </think> before writing the real answer.
+    They may also attempt tool calls via <tool_call> XML in that post-think
+    reasoning section. All such content must be classified as reasoning.
+    
+    Strategy:
+    1. Find the last </think> tag to establish the primary boundary.
+    2. In the post-</think> text, find any <tool_call> blocks — all text
+       up to and including the last tool call block is still reasoning.
+    3. Only text after all think/tool_call blocks is the actual answer.
+    4. Strip all XML tags from reasoning; strip tool_call blocks from answer.
+    
+    Returns:
+        (reasoning_text, answer_text) — both with tags stripped.
+    """
+    if not raw_content:
+        return ("", "")
+    
+    # Find the last </think> boundary in the RAW content (before any stripping)
+    last_think_close = raw_content.rfind("</think>")
+    
+    if last_think_close == -1:
+        # No </think> found
+        if "<think>" in raw_content:
+            # Unclosed think block — everything is reasoning
+            stripped = re.sub(r"</?think>", "", raw_content)
+            stripped = re.sub(r"<tool_call>.*?</tool_call>", "", stripped, flags=re.DOTALL)
+            return (stripped.strip(), "")
+        # No think blocks at all — check for tool_call blocks
+        if "<tool_call>" in raw_content:
+            # Has tool calls but no think blocks — find the last tool call end
+            last_tc_end = _find_last_toolcall_end(raw_content)
+            if last_tc_end > 0:
+                reasoning_part = raw_content[:last_tc_end]
+                answer_part = raw_content[last_tc_end:]
+                reasoning_clean = re.sub(r"<tool_call>.*?</tool_call>", "", reasoning_part, flags=re.DOTALL).strip()
+                return (reasoning_clean, answer_part.strip())
+        return ("", raw_content)
+    
+    # Split at the </think> boundary
+    reasoning_before = raw_content[:last_think_close + len("</think>")]
+    after_think = raw_content[last_think_close + len("</think>"):]
+    
+    # In the post-</think> section, check for <tool_call> blocks.
+    # Any text up to and including the last tool call block is still reasoning.
+    last_tc_end = _find_last_toolcall_end(after_think)
+    
+    if last_tc_end > 0:
+        # There are tool call attempts after </think> — classify text around them as reasoning
+        additional_reasoning = after_think[:last_tc_end]
+        answer_raw = after_think[last_tc_end:]
+    else:
+        additional_reasoning = ""
+        answer_raw = after_think
+    
+    # Clean up reasoning: merge think blocks + any additional post-think reasoning
+    reasoning_clean = re.sub(r"</?think>", "", reasoning_before)
+    if additional_reasoning:
+        additional_clean = re.sub(r"<tool_call>.*?</tool_call>", "", additional_reasoning, flags=re.DOTALL)
+        reasoning_clean += "\n" + additional_clean
+    reasoning_clean = reasoning_clean.strip()
+    
+    # Clean up answer: strip any residual tags
+    answer_clean = re.sub(r"<tool_call>.*?</tool_call>", "", answer_raw, flags=re.DOTALL).strip()
+    
+    return (reasoning_clean, answer_clean)
+
+
+def _find_last_toolcall_end(text: str) -> int:
+    """Find the character position after the last </tool_call> in text. Returns 0 if none found."""
+    last_pos = 0
+    end_tag = "</tool_call>"
+    idx = text.find(end_tag)
+    while idx != -1:
+        last_pos = idx + len(end_tag)
+        idx = text.find(end_tag, last_pos)
+    return last_pos
 
 async def run_flash_agent(messages: list[dict], writer) -> str:
     """
@@ -74,24 +158,42 @@ async def run_flash_agent(messages: list[dict], writer) -> str:
             writer({"event": "state_change", "state": "synthesizing"})
 
         # Flush the buffered tokens with the appropriate is_reasoning flag
-        for chunk, client_is_reasoning in buffered_tokens:
-            if is_final:
-                # Simulate smooth real-time streaming for the final answer
-                await asyncio.sleep(0.003)
-                final_is_reasoning = client_is_reasoning
-            else:
-                # Force tool reasoning logs into the thinking accordion
-                final_is_reasoning = True
-                
-            if not final_is_reasoning:
-                streamed_final_chars_count += len(chunk.strip())
-                
-            writer({
-                "event": "token",
-                "source": "Think",
-                "text": chunk,
-                "is_reasoning": final_is_reasoning
-            })
+        if is_final:
+            # FINAL ITERATION: Don't trust the stream filter's is_reasoning classification.
+            # Qwen3 models often continue reasoning in plain text after </think>,
+            # which the filter incorrectly marks as is_reasoning=False.
+            # Instead, re-parse resp.content to find the true answer boundary.
+            reasoning_text, answer_text = _extract_answer_from_content(resp.content or "")
+            
+            if reasoning_text:
+                writer({
+                    "event": "token",
+                    "source": "Think",
+                    "text": reasoning_text,
+                    "is_reasoning": True
+                })
+            
+            if answer_text:
+                # Stream the actual answer with paced typing
+                for i in range(0, len(answer_text), 4):
+                    chunk = answer_text[i:i+4]
+                    await asyncio.sleep(0.003)
+                    writer({
+                        "event": "token",
+                        "source": "Think",
+                        "text": chunk,
+                        "is_reasoning": False
+                    })
+                streamed_final_chars_count += len(answer_text.strip())
+        else:
+            # NON-FINAL: Force all tokens into the thinking accordion
+            for chunk, _client_is_reasoning in buffered_tokens:
+                writer({
+                    "event": "token",
+                    "source": "Think",
+                    "text": chunk,
+                    "is_reasoning": True
+                })
         
         if resp.usage:
             u = resp.usage
@@ -107,7 +209,12 @@ async def run_flash_agent(messages: list[dict], writer) -> str:
         assistant_msg = {"role": "assistant"}
         if resp.content:
             assistant_msg["content"] = resp.content
-            final_content = resp.content
+            if is_final:
+                # Store the clean answer as final_content (not raw content with <think> tags)
+                _, clean_answer = _extract_answer_from_content(resp.content)
+                final_content = clean_answer or resp.content
+            else:
+                final_content = resp.content
         if resp.tool_calls:
             assistant_msg["tool_calls"] = resp.tool_calls
         conversation.append(assistant_msg)
@@ -194,18 +301,31 @@ async def run_flash_agent(messages: list[dict], writer) -> str:
             temperature=0.6,
         )
         
-        # Flush the final answer tokens cleanly as final content (is_reasoning=False)
-        for chunk, client_is_reasoning in buffered_tokens:
-            await asyncio.sleep(0.003)
+        # Flush the final answer tokens using the same boundary detection
+        reasoning_text, answer_text = _extract_answer_from_content(resp.content or "")
+        
+        if reasoning_text:
             writer({
                 "event": "token",
                 "source": "Think",
-                "text": chunk,
-                "is_reasoning": False
+                "text": reasoning_text,
+                "is_reasoning": True
             })
+        
+        if answer_text:
+            for i in range(0, len(answer_text), 4):
+                chunk = answer_text[i:i+4]
+                await asyncio.sleep(0.003)
+                writer({
+                    "event": "token",
+                    "source": "Think",
+                    "text": chunk,
+                    "is_reasoning": False
+                })
             
         if resp.content:
-            final_content = resp.content
+            _, clean_answer = _extract_answer_from_content(resp.content)
+            final_content = clean_answer or resp.content
             
         if resp.usage:
             u = resp.usage
