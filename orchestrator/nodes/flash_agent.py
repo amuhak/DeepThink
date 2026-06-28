@@ -47,6 +47,16 @@ def _extract_answer_from_content(raw_content: str) -> tuple[str, str]:
                 answer_part = raw_content[last_tc_end:]
                 reasoning_clean = re.sub(r"<tool_call>.*?</tool_call>", "", reasoning_part, flags=re.DOTALL).strip()
                 return (reasoning_clean, answer_part.strip())
+                
+        # Fallback for "Thinking:" / "Answer:" format
+        match = re.search(r"^(.*?)(?:\n\s*)?Answer:(.*)", raw_content, re.DOTALL | re.IGNORECASE)
+        if match and "thinking:" in raw_content.lower():
+            reasoning = match.group(1).strip()
+            if reasoning.lower().startswith("thinking:"):
+                reasoning = reasoning[9:].strip()
+            answer = match.group(2).strip()
+            return (reasoning, answer)
+            
         return ("", raw_content)
     
     # Split at the </think> boundary
@@ -88,6 +98,13 @@ def _find_last_toolcall_end(text: str) -> int:
         idx = text.find(end_tag, last_pos)
     return last_pos
 
+def _get_text_from_content(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text")
+    return ""
+
 async def run_flash_agent(messages: list[dict], writer) -> str:
     """
     Executes a single-call tool-using agent (FlashAgent) for simple tasks.
@@ -105,7 +122,8 @@ async def run_flash_agent(messages: list[dict], writer) -> str:
         "- Symbolic & Rendering: sympy, matplotlib, PIL (Pillow)\n"
         "- Parsing: beautifulsoup4, lxml\n\n"
         "OUTPUT FORMAT:\n"
-        "- Summarize your final answer clearly.\n"
+        "- If you need to reason or think step-by-step before answering, you MUST wrap your entire thought process inside `<think>` and `</think>` XML tags. Do not use 'Thinking:' or other formats. Only use `<think>...</think>`.\n"
+        "- Summarize your final answer clearly outside of the think tags.\n"
         "- Cite your sources using complete, untruncated Markdown links (e.g., [Title](URL)) for any facts found via search/scrape. Do NOT truncate, shorten, or omit the URLs under any circumstances.\n"
         "- STRICTLY FORBID META-COMMENTARY & PREAMBLES: Absolutely do NOT output any conversational filler, meta-commentary, transition phrases, or self-summaries (e.g., never say 'I now have a comprehensive understanding...', 'I have all the information...', 'Here is the summary:', or 'I will summarize the key points...'). Begin your final answer immediately, cleanly, and directly with the facts, code, or explanation."
     )
@@ -136,7 +154,7 @@ async def run_flash_agent(messages: list[dict], writer) -> str:
         if tool_executions_count >= max_tool_executions:
             supported_tools = []
             # Inject a quota exhaustion warning to force the model to synthesize the final answer
-            if not any(msg.get("role") == "user" and "quota has been exhausted" in msg.get("content", "") for msg in conversation):
+            if not any(msg.get("role") == "user" and "quota has been exhausted" in _get_text_from_content(msg.get("content", "")) for msg in conversation):
                 conversation.append({
                     "role": "user",
                     "content": "SYSTEM WARNING: Your maximum tool execution quota of 9 calls has been exhausted. You cannot call any more tools. You MUST immediately synthesize and write your final answer now using the information gathered so far."
@@ -304,6 +322,12 @@ async def run_flash_agent(messages: list[dict], writer) -> str:
         # Flush the final answer tokens using the same boundary detection
         reasoning_text, answer_text = _extract_answer_from_content(resp.content or "")
         
+        # Fallback safeguard: if the safeguard failed to generate a separate answer,
+        # treat the entire content (or reasoning text) as the visible answer.
+        if not answer_text.strip():
+            answer_text = reasoning_text or resp.content or ""
+            reasoning_text = ""
+            
         if reasoning_text:
             writer({
                 "event": "token",
@@ -336,6 +360,13 @@ async def run_flash_agent(messages: list[dict], writer) -> str:
                 "event": "usage",
                 "usage": u
             })
+            
+    import sys
+    print("\n" + "=" * 80, flush=True)
+    print("[DEBUG] RAW API RESPONSE (final_content) FOR THINK AGENT:", flush=True)
+    print(repr(final_content), flush=True)
+    print("=" * 80 + "\n", flush=True)
+    sys.stdout.flush()
             
     return {
         "content": final_content,

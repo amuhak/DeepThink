@@ -49,9 +49,11 @@ class DeepThinkQueue:
 deepthink_queue = DeepThinkQueue()
 
 
+from typing import Any
+
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: str | list[dict[str, Any]]
 
 
 class StreamOptions(BaseModel):
@@ -71,8 +73,19 @@ def extract_user_prompt(messages: list[ChatMessage]) -> str:
     last_user = ""
     for msg in messages:
         if msg.role == "user":
-            last_user = msg.content
-    return last_user or messages[-1].content if messages else ""
+            if isinstance(msg.content, str):
+                last_user = msg.content
+            elif isinstance(msg.content, list):
+                text_parts = [part.get("text", "") for part in msg.content if isinstance(part, dict) and part.get("type") == "text"]
+                last_user = "\n".join(text_parts)
+    if not last_user and messages:
+        last_msg = messages[-1].content
+        if isinstance(last_msg, str):
+            last_user = last_msg
+        elif isinstance(last_msg, list):
+            text_parts = [part.get("text", "") for part in last_msg if isinstance(part, dict) and part.get("type") == "text"]
+            last_user = "\n".join(text_parts)
+    return last_user
 
 
 def build_sse_chunk(
