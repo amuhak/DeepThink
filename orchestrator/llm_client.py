@@ -373,4 +373,4 @@ class LLMClient:
 
 
 pro_client = LLMClient(PRO_LLM_URL, PRO_MODEL, timeout=FLASH_TIMEOUT)
-flash_client = LLMClient(PRO_LLM_URL, PRO_MODEL, timeout=FLASH_TIMEOUT)
+flash_client = LLMClient(FLASH_LLM_URL, FLASH_MODEL, timeout=FLASH_TIMEOUT)
