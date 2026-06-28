@@ -1,4 +1,4 @@
-FROM dhi.io/python:3.13-debian13-sfw-dev AS builder
+FROM dhi.io/python:3.14-debian13-sfw-dev AS builder
 
 WORKDIR /app
 RUN python -m venv /opt/venv
@@ -7,7 +7,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-FROM dhi.io/python:3.13
+FROM dhi.io/python:3.14
 
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
