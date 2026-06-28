@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  firecrawl-redis:
+    image: redis:alpine
+    container_name: firecrawl-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - firecrawl-redis-data:/data
+    networks:
+      - firecrawl-network
+
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    container_name: firecrawl-playwright
+    restart: unless-stopped
+    shm_size: "2g"
+    environment:
+      - PORT=3000
+      - BLOCK_MEDIA=true
+    networks:
+      - firecrawl-network
+
+  firecrawl-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    container_name: firecrawl-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+    volumes:
+      - firecrawl-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - firecrawl-network
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:4-alpine
+    container_name: firecrawl-rabbitmq
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - firecrawl-network
+
+  firecrawl-api:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    container_name: firecrawl-api
+    restart: unless-stopped
+    environment:
+      - PORT=3002
+      - HOST=0.0.0.0
+      - REDIS_URL=redis://firecrawl-redis:6379
+      - REDIS_RATE_LIMIT_URL=redis://firecrawl-redis:6379
+      - PLAYWRIGHT_MICROSERVICE_URL=http://firecrawl-playwright:3000/scrape
+      - USE_DB_AUTHENTICATION=false
+      - SELF_HOST=true
+      - NUM_WORKERS_PER_QUEUE=2
+      - BROWSER_POOL_SIZE=2
+      - CRAWL_CONCURRENT_REQUESTS=10
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - NUQ_DATABASE_URL=postgres://postgres:postgres@firecrawl-postgres:5432/postgres
+      - NUQ_RABBITMQ_URL=amqp://firecrawl-rabbitmq:5672
+    depends_on:
+      firecrawl-redis:
+        condition: service_started
+      firecrawl-playwright:
+        condition: service_started
+      firecrawl-postgres:
+        condition: service_healthy
+      firecrawl-rabbitmq:
+        condition: service_healthy
+    networks:
+      - firecrawl-network
+
+volumes:
+  firecrawl-redis-data:
+  firecrawl-postgres-data:
+
+networks:
+  firecrawl-network:
+    external: true
